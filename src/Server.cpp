@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
 
   std::cout << "Client connected\n";
 
-  vector<char> buffer(4096);
+  std::vector<char> buffer(4096);
 
   int recv_len=recv(client_fd, buffer.data(), buffer.size(), 0);
 
