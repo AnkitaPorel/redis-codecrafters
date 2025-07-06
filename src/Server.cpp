@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <string>
 #include <cstring>
+#include <vector>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -52,8 +53,22 @@ int main(int argc, char **argv) {
 
   // Uncomment this block to pass the first stage
   // 
-  accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
+  // accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
+
+  int client_fd=accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
+
   std::cout << "Client connected\n";
+
+  vector<char> buffer(4096);
+
+  int recv_len=recv(client_fd, buffer.data(), buffer.size(), 0);
+
+  if(recv_len!=-1)
+    buffer.resize(recv_len);
+
+  int send_len=send(client_fd, "+PONG\r\n", 7, 0);
+
+  close(client_fd);
   
   close(server_fd);
 
