@@ -58,15 +58,20 @@ int main(int argc, char **argv) {
   int client_fd=accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
 
   std::cout << "Client connected\n";
+  while(true)
+  {
+    std::vector<char> buffer(4096);
 
-  std::vector<char> buffer(4096);
+    int recv_len=recv(client_fd, buffer.data(), buffer.size(), 0);
 
-  int recv_len=recv(client_fd, buffer.data(), buffer.size(), 0);
+    if(recv_len!=-1)
+      buffer.resize(recv_len);
 
-  if(recv_len!=-1)
-    buffer.resize(recv_len);
+    if(recv_len==-1)
+      break;
 
-  int send_len=send(client_fd, "+PONG\r\n", 7, 0);
+    int send_len=send(client_fd, "+PONG\r\n", 7, 0);
+  }
 
   close(client_fd);
   
