@@ -13,11 +13,13 @@
 #include <sys/select.h>
 #include "redis_parser.hpp"
 
+// Struct to store value and optional expiry time
 struct ValueEntry {
     std::string value;
-    std::chrono::steady_clock::time_point expiry;
-    bool has_expiry;
+    std::chrono::steady_clock::time_point expiry; // Expiry time point
+    bool has_expiry; // Flag to indicate if expiry is set
 
+    // Default constructor
     ValueEntry() : value(""), has_expiry(false) {}
 
     ValueEntry(const std::string& val)
@@ -27,8 +29,10 @@ struct ValueEntry {
         : value(val), expiry(exp), has_expiry(true) {}
 };
 
+// In-memory key-value store
 std::map<std::string, ValueEntry> kv_store;
 
+// Get current time for expiry checks
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
 }
@@ -38,25 +42,30 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
-    std::string command = parsed_command[0];
+    std::string command = parsed_command[0]; // Command is already uppercase from parser
 
     if (command == "PING") {
+        // Respond with simple string "+PONG\r\n"
         std::string response = "+PONG\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "ECHO" && parsed_command.size() == 2) {
+        // Respond with the argument as a RESP bulk string
         std::string arg = parsed_command[1];
         std::string response = "$" + std::to_string(arg.length()) + "\r\n" + arg + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
+        // Handle SET command with or without PX expiry
         std::string key = parsed_command[1];
         std::string value = parsed_command[2];
 
         if (parsed_command.size() == 3) {
+            // SET without expiry
             kv_store[key] = ValueEntry(value);
         } else if (parsed_command.size() == 5) {
+            // SET with PX expiry
             std::string px_arg = parsed_command[3];
             for (char& c : px_arg) {
-                c = std::toupper(c);
+                c = std::toupper(c); // Case-insensitive PX
             }
             if (px_arg == "PX") {
                 try {
@@ -66,7 +75,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                         send(client_fd, response.c_str(), response.length(), 0);
                         return;
                     }
-                    autoಮado auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
+                    auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
                     kv_store[key] = ValueEntry(value, expiry_time);
                 } catch (const std::exception& e) {
                     std::string response = "-ERR invalid expire time\r\n";
@@ -82,28 +91,35 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "+OK\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "GET" && parsed_command.size() == 2) {
+        // Retrieve value for key and respond with RESP bulk string
         std::string key = parsed_command[1];
         auto it = kv_store.find(key);
         std::string response;
         if (it != kv_store.end()) {
+            // Check if key has expired
             if (it->second.has_expiry && get_current_time() > it->second.expiry) {
+                // Key has expired, remove it
                 kv_store.erase(it);
                 response = "$-1\r\n";
             } else {
+                // Key exists and is not expired
                 std::string value = it->second.value;
                 response = "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
             }
         } else {
+            // Key doesn't exist
             response = "$-1\r\n";
         }
         send(client_fd, response.c_str(), response.length(), 0);
     } else {
+        // Handle unknown commands or invalid argument counts
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
 }
 
 int main(int argc, char **argv) {
+    // Flush after every std::cout / std::cerr
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
@@ -113,6 +129,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Set SO_REUSEADDR to avoid 'Address already in use' errors
     int reuse = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
         std::cerr << "setsockopt failed\n";
@@ -125,7 +142,7 @@ int main(int argc, char **argv) {
     server_addr.sin_port = htons(6379);
 
     if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
- inhomogeneous: std::cerr << "Failed to bind to port 6379\n";
+        std::cerr << "Failed to bind to port 6379\n";
         return 1;
     }
 
@@ -146,6 +163,7 @@ int main(int argc, char **argv) {
         FD_SET(server_fd, &read_fds);
         int max_fd = server_fd;
 
+        // Add all client file descriptors to the set
         for (int fd : client_fds) {
             FD_SET(fd, &read_fds);
             if (fd > max_fd) {
@@ -153,12 +171,14 @@ int main(int argc, char **argv) {
             }
         }
 
+        // Use select() to monitor sockets
         if (select(max_fd + 1, &read_fds, nullptr, nullptr, nullptr) < 0) {
             std::cerr << "select failed\n";
             close(server_fd);
             return 1;
         }
 
+        // Check for new connections
         if (FD_ISSET(server_fd, &read_fds)) {
             struct sockaddr_in client_addr;
             socklen_t client_addr_len = sizeof(client_addr);
@@ -171,6 +191,7 @@ int main(int argc, char **argv) {
             client_fds.push_back(client_fd);
         }
 
+        // Check for data from clients
         for (auto it = client_fds.begin(); it != client_fds.end();) {
             int client_fd = *it;
             if (FD_ISSET(client_fd, &read_fds)) {
@@ -178,6 +199,7 @@ int main(int argc, char **argv) {
                 int bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
                 if (bytes_received <= 0) {
+                    // Client disconnected or error occurred
                     std::cout << "Client disconnected (fd: " << client_fd << ")\n";
                     close(client_fd);
                     it = client_fds.erase(it);
