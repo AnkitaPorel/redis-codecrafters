@@ -3,16 +3,33 @@
 #include <string>
 #include <cstring>
 #include <vector>
+#include <map>
+#include <chrono>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/select.h>
-#include <map>
 #include "redis_parser.hpp"
 
-std::map<std::string, std::string> kv_store;
+struct ValueEntry {
+    std::string value;
+    std::chrono::steady_clock::time_point expiry;
+    bool has_expiry;
+
+    ValueEntry(const std::string& val)
+        : value(val), has_expiry(false) {}
+
+    ValueEntry(const std::string& val, std::chrono::steady_clock::time_point exp)
+        : value(val), expiry(exp), has_expiry(true) {}
+};
+
+std::map<std::string, ValueEntry> kv_store;
+
+std::chrono::steady_clock::time_point get_current_time() {
+    return std::chrono::steady_clock::now();
+}
 
 void execute_redis_command(int client_fd, const std::vector<std::string>& parsed_command) {
     if (parsed_command.empty()) {
@@ -28,10 +45,38 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string arg = parsed_command[1];
         std::string response = "$" + std::to_string(arg.length()) + "\r\n" + arg + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
-    } else if (command == "SET" && parsed_command.size() == 3) {
+    } else if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
         std::string key = parsed_command[1];
         std::string value = parsed_command[2];
-        kv_store[key] = value;
+
+        if (parsed_command.size() == 3) {
+            kv_store[key] = ValueEntry(value);
+        } else if (parsed_command.size() == 5) {
+            std::string px_arg = parsed_command[3];
+            for (char& c : px_arg) {
+                c = std::toupper(c);
+            }
+            if (px_arg == "PX") {
+                try {
+                    long expiry_ms = std::stol(parsed_command[4]);
+                    if (expiry_ms <= 0) {
+                        std::string response = "-ERR invalid expire time\r\n";
+                        send(client_fd, response.c_str(), response.length(), 0);
+                        return;
+                    }
+                    auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
+                    kv_store[key] = ValueEntry(value, expiry_time);
+                } catch (const std::exception& e) {
+                    std::string response = "-ERR invalid expire time\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                    return;
+                }
+            } else {
+                std::string response = "-ERR syntax error\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+        }
         std::string response = "+OK\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "GET" && parsed_command.size() == 2) {
@@ -39,8 +84,13 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         auto it = kv_store.find(key);
         std::string response;
         if (it != kv_store.end()) {
-            std::string value = it->second;
-            response = "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
+            if (it->second.has_expiry && get_current_time() > it->second.expiry) {
+                kv_store.erase(it);
+                response = "$-1\r\n";
+            } else {
+                std::string value = it->second.value;
+                response = "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
+            }
         } else {
             response = "$-1\r\n";
         }
