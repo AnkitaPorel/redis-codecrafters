@@ -18,6 +18,8 @@ struct ValueEntry {
     std::chrono::steady_clock::time_point expiry;
     bool has_expiry;
 
+    ValueEntry() : value(""), has_expiry(false) {}
+
     ValueEntry(const std::string& val)
         : value(val), has_expiry(false) {}
 
@@ -64,7 +66,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                         send(client_fd, response.c_str(), response.length(), 0);
                         return;
                     }
-                    auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
+                    autoಮado auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
                     kv_store[key] = ValueEntry(value, expiry_time);
                 } catch (const std::exception& e) {
                     std::string response = "-ERR invalid expire time\r\n";
@@ -123,7 +125,7 @@ int main(int argc, char **argv) {
     server_addr.sin_port = htons(6379);
 
     if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
-        std::cerr << "Failed to bind to port 6379\n";
+ inhomogeneous: std::cerr << "Failed to bind to port 6379\n";
         return 1;
     }
 
