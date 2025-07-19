@@ -31,6 +31,7 @@ struct ValueEntry {
 
 std::map<std::string, ValueEntry> kv_store;
 ServerConfig config;
+int server_port = 6379; // Default port
 
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
@@ -201,9 +202,22 @@ int main(int argc, char **argv) {
                 config.dir = argv[i + 1];
             } else if (arg == "--dbfilename") {
                 config.dbfilename = argv[i + 1];
+            } else if (arg == "--port") {
+                try {
+                    server_port = std::stoi(argv[i + 1]);
+                    if (server_port <= 0 || server_port > 65535) {
+                        std::cerr << "Invalid port number: " << argv[i + 1] << std::endl;
+                        return 1;
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "Invalid port number: " << argv[i + 1] << std::endl;
+                    return 1;
+                }
             }
         }
     }
+
+    std::cout << "Starting Redis server on port " << server_port << std::endl;
 
     // Load RDB file at startup
     load_rdb_file();
@@ -223,10 +237,10 @@ int main(int argc, char **argv) {
     struct sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(6379);
+    server_addr.sin_port = htons(server_port); // Use configurable port
 
     if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
-        std::cerr << "Failed to bind to port 6379\n";
+        std::cerr << "Failed to bind to port " << server_port << "\n";
         return 1;
     }
 
