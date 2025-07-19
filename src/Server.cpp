@@ -32,6 +32,9 @@ struct ValueEntry {
 std::map<std::string, ValueEntry> kv_store;
 ServerConfig config;
 int server_port = 6379; // Default port
+bool is_replica = false;
+std::string master_host;
+int master_port;
 
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
