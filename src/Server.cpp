@@ -76,7 +76,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                     kv_store[key] = ValueEntry(value, expiry_time);
                 } catch (const std::exception& e) {
                     std::string response = "-ERR invalid expire time\r\n";
- test                    send(client_fd, response.c_str(), response.length(), 0);
+                    send(client_fd, response.c_str(), response.length(), 0);
                     return;
                 }
             } else {
