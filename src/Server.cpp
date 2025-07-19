@@ -227,7 +227,7 @@ int main(int argc, char **argv) {
                 int bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
                 if (bytes_received <= 0) {
-                    std::cout << "Client disconnected (fd: " << client_fd <<\";)\n";
+                    std::cout << "Client disconnected (fd: " << client_fd <<";)\n";
                     close(client_fd);
                     it = client_fds.erase(it);
                     continue;
