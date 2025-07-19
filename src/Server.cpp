@@ -11,159 +11,56 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/select.h>
-#include <fstream>
 #include "redis_parser.hpp"
 #include "redis_commands.hpp"
+#include "rdb_parser.hpp"
 
 struct ValueEntry {
     std::string value;
-    std::chrono::system_clock::time_point expiry;
+    std::chrono::steady_clock::time_point expiry;
     bool has_expiry;
 
     ValueEntry() : value(""), has_expiry(false) {}
-    ValueEntry(const std::string& val) : value(val), has_expiry(false) {}
-    ValueEntry(const std::string& val, std::chrono::system_clock::time_point exp)
+
+    ValueEntry(const std::string& val)
+        : value(val), has_expiry(false) {}
+
+    ValueEntry(const std::string& val, std::chrono::steady_clock::time_point exp)
         : value(val), expiry(exp), has_expiry(true) {}
 };
 
 std::map<std::string, ValueEntry> kv_store;
 ServerConfig config;
 
-std::chrono::system_clock::time_point get_current_time() {
-    return std::chrono::system_clock::now();
+std::chrono::steady_clock::time_point get_current_time() {
+    return std::chrono::steady_clock::now();
 }
 
-uint64_t read_size_encoded(std::ifstream& file) {
-    char first_byte;
-    file.get(first_byte);
-    uint8_t first = static_cast<uint8_t>(first_byte);
-    uint8_t type = (first >> 6) & 0x03;
-
-    if (type == 0) { // 6-bit size
-        return first & 0x3F;
-    } else if (type == 1) { // 14-bit size
-        char next_byte;
-        file.get(next_byte);
-        return ((first & 0x3F) << 8) | static_cast<uint8_t>(next_byte);
-    } else if (type == 2) { // 32-bit size
-        uint32_t size = 0;
-        char bytes[4];
-        file.read(bytes, 4);
-        for (int i = 0; i < 4; ++i) {
-            size = (size << 8) | static_cast<uint8_t>(bytes[i]);
-        }
-        return size;
-    } else {
-        throw std::runtime_error("Not a size encoding");
-    }
-}
-
-std::string read_string_encoded(std::ifstream& file) {
-    char first_byte;
-    file.get(first_byte);
-    uint8_t first = static_cast<uint8_t>(first_byte);
-    uint8_t type = (first >> 6) & 0x03;
-
-    if (type == 3) { // Special string encoding
-        uint8_t encoding = first & 0x3F;
-        if (encoding == 0) { // 8-bit integer
-            char byte;
-            file.get(byte);
-            return std::to_string(static_cast<uint8_t>(byte));
-        } else if (encoding == 1) { // 16-bit integer
-            char bytes[2];
-            file.read(bytes, 2);
-            uint16_t value = (static_cast<uint8_t>(bytes[1]) << 8) | static_cast<uint8_t>(bytes[0]);
-            return std::to_string(value);
-        } else if (encoding == 2) { // 32-bit integer
-            char bytes[4];
-            file.read(bytes, 4);
-            uint32_t value = 0;
-            for (int i = 3; i >= 0; --i) {
-                value = (value << 8) | static_cast<uint8_t>(bytes[i]);
-            }
-            return std::to_string(value);
-        } else {
-            throw std::runtime_error("Unsupported string encoding");
-        }
-    } else {
-        file.putback(first_byte);
-        uint64_t length = read_size_encoded(file);
-        std::string str(length, '\0');
-        file.read(&str[0], length);
-        return str;
-    }
-}
-
-void load_rdb_file(const std::string& dir, const std::string& dbfilename) {
-    std::string filepath = dir + "/" + dbfilename;
-    std::ifstream file(filepath, std::ios::binary);
-    if (!file.is_open()) {
-        std::cout << "RDB file not found, starting with empty database\n";
-        return;
-    }
-
-    char header[9];
-    file.read(header, 9);
-    if (std::strncmp(header, "REDIS0011", 9) != 0) {
-        file.close();
-        throw std::runtime_error("Invalid RDB file header");
-    }
-
-    while (file.peek() != EOF && file.peek() != 0xFF) {
-        char byte;
-        file.get(byte);
-        if (byte == 0xFA) { // Metadata
-            read_string_encoded(file); // Skip name
-            read_string_encoded(file); // Skip value
-        } else if (byte == 0xFE) { // Database
-            uint64_t db_index = read_size_encoded(file);
-            if (db_index == 0) {
-                if (file.get(byte) && byte == 0xFB) {
-                    uint64_t hash_table_size = read_size_encoded(file);
-                    uint64_t expire_table_size = read_size_encoded(file);
-                    for (uint64_t i = 0; i < hash_table_size; ++i) {
-                        bool has_expiry = false;
-                        std::chrono::system_clock::time_point expiry_time;
-                        if (file.peek() == 0xFC) {
-                            file.get(); // Consume FC
-                            char bytes[8];
-                            file.read(bytes, 8);
-                            uint64_t millis = 0;
-                            for (int j = 7; j >= 0; --j) {
-                                millis = (millis << 8) | static_cast<uint8_t>(bytes[j]);
-                            }
-                            expiry_time = std::chrono::system_clock::time_point(std::chrono::milliseconds(millis));
-                            has_expiry = true;
-                        } else if (file.peek() == 0xFD) {
-                            file.get(); // Consume FD
-                            char bytes[4];
-                            file.read(bytes, 4);
-                            uint32_t seconds = 0;
-                            for (int j = 3; j >= 0; --j) {
-                                seconds = (seconds << 8) | static_cast<uint8_t>(bytes[j]);
-                            }
-                            expiry_time = std::chrono::system_clock::time_point(std::chrono::seconds(seconds));
-                            has_expiry = true;
-                        }
-                        char value_type;
-                        file.get(value_type);
-                        if (value_type != 0) {
-                            throw std::runtime_error("Only string type supported");
-                        }
-                        std::string key = read_string_encoded(file);
-                        std::string value = read_string_encoded(file);
-                        if (has_expiry) {
-                            kv_store[key] = ValueEntry(value, expiry_time);
-                        } else {
-                            kv_store[key] = ValueEntry(value);
-                        }
-                    }
-                }
+void load_rdb_file() {
+    std::string filepath = config.dir + "/" + config.dbfilename;
+    RDBParser parser;
+    
+    try {
+        auto rdb_data = parser.parse_rdb_file(filepath);
+        
+        // Convert RDBValueEntry to ValueEntry and load into kv_store
+        for (const auto& pair : rdb_data) {
+            const std::string& key = pair.first;
+            const RDBValueEntry& rdb_entry = pair.second;
+            
+            if (rdb_entry.has_expiry) {
+                kv_store[key] = ValueEntry(rdb_entry.value, rdb_entry.expiry);
+            } else {
+                kv_store[key] = ValueEntry(rdb_entry.value);
             }
         }
+        
+        if (!rdb_data.empty()) {
+            std::cout << "Loaded " << rdb_data.size() << " keys from RDB file: " << filepath << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading RDB file: " << e.what() << std::endl;
     }
-    file.close();
 }
 
 void execute_redis_command(int client_fd, const std::vector<std::string>& parsed_command) {
@@ -183,6 +80,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     } else if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
         std::string key = parsed_command[1];
         std::string value = parsed_command[2];
+
         if (parsed_command.size() == 3) {
             kv_store[key] = ValueEntry(value);
         } else if (parsed_command.size() == 5) {
@@ -229,6 +127,32 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             response = "$-1\r\n";
         }
         send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "KEYS" && parsed_command.size() == 2) {
+        std::string pattern = parsed_command[1];
+        
+        if (pattern == "*") {
+            // Remove expired keys first
+            auto current_time = get_current_time();
+            for (auto it = kv_store.begin(); it != kv_store.end();) {
+                if (it->second.has_expiry && current_time > it->second.expiry) {
+                    it = kv_store.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            
+            // Build response array
+            std::string response = "*" + std::to_string(kv_store.size()) + "\r\n";
+            for (const auto& pair : kv_store) {
+                const std::string& key = pair.first;
+                response += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
+            }
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else {
+            // For now, only support "*" pattern
+            std::string response = "-ERR pattern not supported\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
     } else if (command == "CONFIG" && parsed_command.size() == 3 && parsed_command[1] == "GET") {
         std::string param = parsed_command[2];
         std::string param_value;
@@ -241,24 +165,8 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             send(client_fd, response.c_str(), response.length(), 0);
             return;
         }
-        std::string response = "*2\r\n$" + std::to_string(param.length()) + "\r\n" + param + "\r\n$" +
+        std::string response = "*2\r\n$" + std::to_string(param.length()) + "\r\n" + param + "\r\n$" + 
                               std::to_string(param_value.length()) + "\r\n" + param_value + "\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-    } else if (command == "KEYS" && parsed_command.size() == 2 && parsed_command[1] == "*") {
-        std::vector<std::string> valid_keys;
-        auto now = get_current_time();
-        for (auto it = kv_store.begin(); it != kv_store.end(); ) {
-            if (it->second.has_expiry && now > it->second.expiry) {
-                it = kv_store.erase(it);
-            } else {
-                valid_keys.push_back(it->first);
-                ++it;
-            }
-        }
-        std::string response = "*" + std::to_string(valid_keys.size()) + "\r\n";
-        for (const auto& key : valid_keys) {
-            response += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
-        }
         send(client_fd, response.c_str(), response.length(), 0);
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
@@ -270,6 +178,7 @@ int main(int argc, char **argv) {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
+    // Parse command-line arguments
     for (int i = 1; i < argc; i += 2) {
         std::string arg = argv[i];
         if (i + 1 < argc) {
@@ -281,11 +190,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    try {
-        load_rdb_file(config.dir, config.dbfilename);
-    } catch (const std::exception& e) {
-        std::cerr << "Error loading RDB file: " << e.what() << "\n";
-    }
+    // Load RDB file at startup
+    load_rdb_file();
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -304,7 +210,7 @@ int main(int argc, char **argv) {
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(6379);
 
-    if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) != 0) {
+    if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
         std::cerr << "Failed to bind to port 6379\n";
         return 1;
     }
@@ -342,7 +248,7 @@ int main(int argc, char **argv) {
         if (FD_ISSET(server_fd, &read_fds)) {
             struct sockaddr_in client_addr;
             socklen_t client_addr_len = sizeof(client_addr);
-            int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+            int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
             if (client_fd < 0) {
                 std::cerr << "accept failed\n";
                 continue;
@@ -351,7 +257,7 @@ int main(int argc, char **argv) {
             client_fds.push_back(client_fd);
         }
 
-        for (auto it = client_fds.begin(); it != client_fds.end(); ) {
+        for (auto it = client_fds.begin(); it != client_fds.end();) {
             int client_fd = *it;
             if (FD_ISSET(client_fd, &read_fds)) {
                 char buffer[4096];
