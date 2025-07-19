@@ -32,6 +32,8 @@ struct ValueEntry {
 std::map<std::string, ValueEntry> kv_store;
 ServerConfig config;
 int server_port = 6379; // Default port
+
+// Replica configuration
 bool is_replica = false;
 std::string master_host;
 int master_port;
@@ -196,8 +198,13 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
         
         if (section == "replication") {
-            // For now, we're always a master with basic replication info
-            std::string info_content = "role:master";
+            // Return role based on whether this server is a replica or master
+            std::string info_content;
+            if (is_replica) {
+                info_content = "role:slave";
+            } else {
+                info_content = "role:master";
+            }
             std::string response = "$" + std::to_string(info_content.length()) + "\r\n" + info_content + "\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         } else {
@@ -234,11 +241,40 @@ int main(int argc, char **argv) {
                     std::cerr << "Invalid port number: " << argv[i + 1] << std::endl;
                     return 1;
                 }
+            } else if (arg == "--replicaof") {
+                // Parse the master host and port from the argument
+                std::string replicaof_arg = argv[i + 1];
+                size_t space_pos = replicaof_arg.find(' ');
+                if (space_pos == std::string::npos) {
+                    std::cerr << "Invalid --replicaof format. Expected: --replicaof \"<host> <port>\"" << std::endl;
+                    return 1;
+                }
+                
+                master_host = replicaof_arg.substr(0, space_pos);
+                std::string master_port_str = replicaof_arg.substr(space_pos + 1);
+                
+                try {
+                    master_port = std::stoi(master_port_str);
+                    if (master_port <= 0 || master_port > 65535) {
+                        std::cerr << "Invalid master port number: " << master_port_str << std::endl;
+                        return 1;
+                    }
+                    is_replica = true;
+                    std::cout << "Running in replica mode. Master: " << master_host << ":" << master_port << std::endl;
+                } catch (const std::exception& e) {
+                    std::cerr << "Invalid master port number: " << master_port_str << std::endl;
+                    return 1;
+                }
             }
         }
     }
 
-    std::cout << "Starting Redis server on port " << server_port << std::endl;
+    if (is_replica) {
+        std::cout << "Starting Redis replica server on port " << server_port 
+                  << " (master: " << master_host << ":" << master_port << ")" << std::endl;
+    } else {
+        std::cout << "Starting Redis master server on port " << server_port << std::endl;
+    }
 
     // Load RDB file at startup
     load_rdb_file();
