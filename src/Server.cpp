@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/select.h>
+#include <thread>
 #include "redis_parser.hpp"
 #include "redis_commands.hpp"
 #include "rdb_parser.hpp"
@@ -79,6 +80,72 @@ void load_rdb_file() {
     } catch (const std::exception& e) {
         std::cerr << "Error loading RDB file: " << e.what() << std::endl;
     }
+}
+
+void connect_to_master() {
+    if (!is_replica) {
+        return;
+    }
+    
+    std::cout << "Connecting to master at " << master_host << ":" << master_port << std::endl;
+    
+    // Create socket for connecting to master
+    int master_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (master_fd < 0) {
+        std::cerr << "Failed to create socket for master connection" << std::endl;
+        return;
+    }
+    
+    // Resolve master host
+    struct sockaddr_in master_addr;
+    memset(&master_addr, 0, sizeof(master_addr));
+    master_addr.sin_family = AF_INET;
+    master_addr.sin_port = htons(master_port);
+    
+    // Handle localhost and IP addresses
+    if (master_host == "localhost") {
+        master_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    } else if (inet_aton(master_host.c_str(), &master_addr.sin_addr) == 0) {
+        // Try to resolve hostname
+        struct hostent *host_entry = gethostbyname(master_host.c_str());
+        if (host_entry == nullptr) {
+            std::cerr << "Failed to resolve master hostname: " << master_host << std::endl;
+            close(master_fd);
+            return;
+        }
+        memcpy(&master_addr.sin_addr, host_entry->h_addr_list[0], host_entry->h_length);
+    }
+    
+    // Connect to master
+    if (connect(master_fd, (struct sockaddr*)&master_addr, sizeof(master_addr)) < 0) {
+        std::cerr << "Failed to connect to master at " << master_host << ":" << master_port << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Connected to master successfully" << std::endl;
+    
+    // Send PING command as part of handshake
+    std::string ping_command = "*1\r\n$4\r\nPING\r\n";
+    if (send(master_fd, ping_command.c_str(), ping_command.length(), 0) < 0) {
+        std::cerr << "Failed to send PING to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent PING to master" << std::endl;
+    
+    // Wait for PONG response
+    char response_buffer[1024];
+    int bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received > 0) {
+        response_buffer[bytes_received] = '\0';
+        std::cout << "Received response from master: " << response_buffer << std::endl;
+    }
+    
+    // Keep the connection open for future stages
+    // For now, we'll close it since we're only implementing the PING part
+    close(master_fd);
 }
 
 void execute_redis_command(int client_fd, const std::vector<std::string>& parsed_command) {
@@ -283,6 +350,13 @@ int main(int argc, char **argv) {
 
     // Load RDB file at startup
     load_rdb_file();
+
+    // If this is a replica, connect to master and perform handshake
+    if (is_replica) {
+        // Use a separate thread to avoid blocking the main server loop
+        std::thread master_connection_thread(connect_to_master);
+        master_connection_thread.detach(); // Detach so it runs independently
+    }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
