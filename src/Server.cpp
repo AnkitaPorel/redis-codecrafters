@@ -17,23 +17,20 @@
 
 struct ValueEntry {
     std::string value;
-    std::chrono::steady_clock::time_point expiry;
+    std::chrono::system_clock::time_point expiry;
     bool has_expiry;
 
     ValueEntry() : value(""), has_expiry(false) {}
-
-    ValueEntry(const std::string& val)
-        : value(val), has_expiry(false) {}
-
-    ValueEntry(const std::string& val, std::chrono::steady_clock::time_point exp)
+    ValueEntry(const std::string& val) : value(val), has_expiry(false) {}
+    ValueEntry(const std::string& val, std::chrono::system_clock::time_point exp)
         : value(val), expiry(exp), has_expiry(true) {}
 };
 
 std::map<std::string, ValueEntry> kv_store;
 ServerConfig config;
 
-std::chrono::steady_clock::time_point get_current_time() {
-    return std::chrono::steady_clock::now();
+std::chrono::system_clock::time_point get_current_time() {
+    return std::chrono::system_clock::now();
 }
 
 uint64_t read_size_encoded(std::ifstream& file) {
@@ -56,8 +53,8 @@ uint64_t read_size_encoded(std::ifstream& file) {
             size = (size << 8) | static_cast<uint8_t>(bytes[i]);
         }
         return size;
-    } else { // type == 3, special string encoding
-        throw std::runtime_error("Special string encoding not supported");
+    } else {
+        throw std::runtime_error("Not a size encoding");
     }
 }
 
@@ -67,7 +64,7 @@ std::string read_string_encoded(std::ifstream& file) {
     uint8_t first = static_cast<uint8_t>(first_byte);
     uint8_t type = (first >> 6) & 0x03;
 
-    if (type == 3) {
+    if (type == 3) { // Special string encoding
         uint8_t encoding = first & 0x3F;
         if (encoding == 0) { // 8-bit integer
             char byte;
@@ -106,7 +103,6 @@ void load_rdb_file(const std::string& dir, const std::string& dbfilename) {
         return;
     }
 
-    // Read header
     char header[9];
     file.read(header, 9);
     if (std::strncmp(header, "REDIS0011", 9) != 0) {
@@ -114,69 +110,59 @@ void load_rdb_file(const std::string& dir, const std::string& dbfilename) {
         throw std::runtime_error("Invalid RDB file header");
     }
 
-    // Read metadata and database sections
-    while (file.peek() != EOF && file.peek() != 0xFF) { // Stop at EOF or checksum
+    while (file.peek() != EOF && file.peek() != 0xFF) {
         char byte;
         file.get(byte);
-        if (byte == (char)0xFA) { // Metadata subsection
-            std::string meta_name = read_string_encoded(file);
-            std::string meta_value = read_string_encoded(file);
-        } else if (byte == (char)0xFE) { // Database subsection
+        if (byte == 0xFA) { // Metadata
+            read_string_encoded(file); // Skip name
+            read_string_encoded(file); // Skip value
+        } else if (byte == 0xFE) { // Database
             uint64_t db_index = read_size_encoded(file);
-            if (file.peek() == (char)0xFB) {
-                file.get(); // Consume FB
-                uint64_t hash_table_size = read_size_encoded(file);
-                uint64_t expire_table_size = read_size_encoded(file);
-
-                for (uint64_t i = 0; i < hash_table_size; ++i) {
-                    bool has_expiry = false;
-                    std::chrono::steady_clock::time_point expiry_time;
-
-                    if (file.peek() == (char)0xFD) { // Expire in seconds
-                        file.get();
-                        char bytes[4];
-                        file.read(bytes, 4);
-                        uint32_t seconds = 0;
-                        for (int j = 3; j >= 0; --j) {
-                            seconds = (seconds << 8) | static_cast<uint8_t>(bytes[j]);
+            if (db_index == 0) {
+                if (file.get(byte) && byte == 0xFB) {
+                    uint64_t hash_table_size = read_size_encoded(file);
+                    uint64_t expire_table_size = read_size_encoded(file);
+                    for (uint64_t i = 0; i < hash_table_size; ++i) {
+                        bool has_expiry = false;
+                        std::chrono::system_clock::time_point expiry_time;
+                        if (file.peek() == 0xFC) {
+                            file.get(); // Consume FC
+                            char bytes[8];
+                            file.read(bytes, 8);
+                            uint64_t millis = 0;
+                            for (int j = 7; j >= 0; --j) {
+                                millis = (millis << 8) | static_cast<uint8_t>(bytes[j]);
+                            }
+                            expiry_time = std::chrono::system_clock::time_point(std::chrono::milliseconds(millis));
+                            has_expiry = true;
+                        } else if (file.peek() == 0xFD) {
+                            file.get(); // Consume FD
+                            char bytes[4];
+                            file.read(bytes, 4);
+                            uint32_t seconds = 0;
+                            for (int j = 3; j >= 0; --j) {
+                                seconds = (seconds << 8) | static_cast<uint8_t>(bytes[j]);
+                            }
+                            expiry_time = std::chrono::system_clock::time_point(std::chrono::seconds(seconds));
+                            has_expiry = true;
                         }
-                        // Convert Unix timestamp (seconds) to steady_clock
-                        auto duration = std::chrono::seconds(seconds);
-                        expiry_time = std::chrono::steady_clock::time_point(duration);
-                        has_expiry = true;
-                    } else if (file.peek() == (char)0xFC) { // Expire in milliseconds
-                        file.get();
-                        char bytes[8];
-                        file.read(bytes, 8);
-                        uint64_t millis = 0;
-                        for (int j = 7; j >= 0; --j) {
-                            millis = (millis << 8) | static_cast<uint8_t>(bytes[j]);
+                        char value_type;
+                        file.get(value_type);
+                        if (value_type != 0) {
+                            throw std::runtime_error("Only string type supported");
                         }
-                        // Convert Unix timestamp (milliseconds) to steady_clock
-                        auto duration = std::chrono::milliseconds(millis);
-                        expiry_time = std::chrono::steady_clock::time_point(duration);
-                        has_expiry = true;
-                    }
-
-                    char value_type;
-                    file.get(value_type);
-                    if (value_type != 0) {
-                        throw std::runtime_error("Only string type supported");
-                    }
-
-                    std::string key = read_string_encoded(file);
-                    std::string value = read_string_encoded(file);
-
-                    if (has_expiry) {
-                        kv_store[key] = ValueEntry(value, expiry_time);
-                    } else {
-                        kv_store[key] = ValueEntry(value);
+                        std::string key = read_string_encoded(file);
+                        std::string value = read_string_encoded(file);
+                        if (has_expiry) {
+                            kv_store[key] = ValueEntry(value, expiry_time);
+                        } else {
+                            kv_store[key] = ValueEntry(value);
+                        }
                     }
                 }
             }
         }
     }
-
     file.close();
 }
 
@@ -197,7 +183,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     } else if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
         std::string key = parsed_command[1];
         std::string value = parsed_command[2];
-
         if (parsed_command.size() == 3) {
             kv_store[key] = ValueEntry(value);
         } else if (parsed_command.size() == 5) {
@@ -238,7 +223,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 response = "$-1\r\n";
             } else {
                 std::string value = it->second.value;
-                response = "$" + std::to_string( value.length()) + "\r\n" + value + "\r\n";
+                response = "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
             }
         } else {
             response = "$-1\r\n";
@@ -256,13 +241,14 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             send(client_fd, response.c_str(), response.length(), 0);
             return;
         }
-        std::string response = "*2\r\n$" + std::to_string(param.length()) + "\r\n" + param + "\r\n$" + 
+        std::string response = "*2\r\n$" + std::to_string(param.length()) + "\r\n" + param + "\r\n$" +
                               std::to_string(param_value.length()) + "\r\n" + param_value + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "KEYS" && parsed_command.size() == 2 && parsed_command[1] == "*") {
         std::vector<std::string> valid_keys;
-        for (auto it = kv_store.begin(); it != kv_store.end();) {
-            if (it->second.has_expiry && get_current_time() > it->second.expiry) {
+        auto now = get_current_time();
+        for (auto it = kv_store.begin(); it != kv_store.end(); ) {
+            if (it->second.has_expiry && now > it->second.expiry) {
                 it = kv_store.erase(it);
             } else {
                 valid_keys.push_back(it->first);
@@ -284,7 +270,6 @@ int main(int argc, char **argv) {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
-    // Parse command-line arguments
     for (int i = 1; i < argc; i += 2) {
         std::string arg = argv[i];
         if (i + 1 < argc) {
@@ -296,7 +281,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Load RDB file
     try {
         load_rdb_file(config.dir, config.dbfilename);
     } catch (const std::exception& e) {
@@ -320,13 +304,13 @@ int main(int argc, char **argv) {
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(6379);
 
-    if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
+    if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) != 0) {
         std::cerr << "Failed to bind to port 6379\n";
         return 1;
     }
 
-    int connection_backDown = 5;
-    if (listen(server_fd, connection_backDown) != 0) {
+    int connection_backlog = 5;
+    if (listen(server_fd, connection_backlog) != 0) {
         std::cerr << "listen failed\n";
         return 1;
     }
@@ -358,7 +342,7 @@ int main(int argc, char **argv) {
         if (FD_ISSET(server_fd, &read_fds)) {
             struct sockaddr_in client_addr;
             socklen_t client_addr_len = sizeof(client_addr);
-            int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
+            int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
             if (client_fd < 0) {
                 std::cerr << "accept failed\n";
                 continue;
@@ -367,11 +351,11 @@ int main(int argc, char **argv) {
             client_fds.push_back(client_fd);
         }
 
-        for (auto it = client_fds.begin(); it != client_fds.end();) {
+        for (auto it = client_fds.begin(); it != client_fds.end(); ) {
             int client_fd = *it;
             if (FD_ISSET(client_fd, &read_fds)) {
                 char buffer[4096];
-                int bytes_received = recv(client_fd, buffer, sizeof(buffer - 1), 0);
+                int bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
                 if (bytes_received <= 0) {
                     std::cout << "Client disconnected (fd: " << client_fd << ")\n";
