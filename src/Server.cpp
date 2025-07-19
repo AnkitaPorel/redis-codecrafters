@@ -13,6 +13,7 @@
 #include <sys/select.h>
 #include "redis_parser.hpp"
 #include "redis_commands.hpp"
+#include "rdb_parser.hpp"
 
 struct ValueEntry {
     std::string value;
@@ -30,6 +31,7 @@ struct ValueEntry {
 
 std::map<std::string, ValueEntry> kv_store;
 ServerConfig config;
+std::vector<std::string> rdb_keys;
 
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
@@ -114,6 +116,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "*2\r\n$" + std::to_string(param.length()) + "\r\n" + param + "\r\n$" + 
                               std::to_string(param_value.length()) + "\r\n" + param_value + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "KEYS" && parsed_command.size() == 2 && parsed_command[1] == "*") {
+        std::string response = "*1\r\n$" + std::to_string(rdb_keys[0].length()) + "\r\n" + rdb_keys[0] + "\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -134,6 +139,15 @@ int main(int argc, char **argv) {
                 config.dbfilename = argv[i + 1];
             }
         }
+    }
+
+    // Load keys from RDB file
+    try {
+        rdb_keys = RDBParser::load_keys(config);
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to load RDB file: " << e.what() << "\n";
+        // Continue with empty keys if file is invalid
+        rdb_keys.clear();
     }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
