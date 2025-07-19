@@ -12,6 +12,7 @@
 #include <netdb.h>
 #include <sys/select.h>
 #include "redis_parser.hpp"
+#include "redis_commands.hpp"
 
 struct ValueEntry {
     std::string value;
@@ -28,6 +29,7 @@ struct ValueEntry {
 };
 
 std::map<std::string, ValueEntry> kv_store;
+ServerConfig config;
 
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
@@ -97,6 +99,21 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             response = "$-1\r\n";
         }
         send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "CONFIG" && parsed_command.size() == 3 && parsed_command[1] == "GET") {
+        std::string param = parsed_command[2];
+        std::string param_value;
+        if (param == "dir") {
+            param_value = config.dir;
+        } else if (param == "dbfilename") {
+            param_value = config.dbfilename;
+        } else {
+            std::string response = "-ERR unknown parameter\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+        std::string response = "*2\r\n$" + std::to_string(param.length()) + "\r\n" + param + "\r\n$" + 
+                              std::to_string(param_value.length()) + "\r\n" + param_value + "\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -106,6 +123,18 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 int main(int argc, char **argv) {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
+
+    // Parse command-line arguments
+    for (int i = 1; i < argc; i += 2) {
+        std::string arg = argv[i];
+        if (i + 1 < argc) {
+            if (arg == "--dir") {
+                config.dir = argv[i + 1];
+            } else if (arg == "--dbfilename") {
+                config.dbfilename = argv[i + 1];
+            }
+        }
+    }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
