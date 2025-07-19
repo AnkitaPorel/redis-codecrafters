@@ -389,6 +389,25 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             std::string response = "-ERR unsupported REPLCONF subcommand\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         }
+    } else if (command == "PSYNC" && parsed_command.size() == 3) {
+        // Handle PSYNC command from replicas
+        std::string repl_id = parsed_command[1];  // Should be "?" for initial sync
+        std::string offset = parsed_command[2];   // Should be "-1" for initial sync
+        
+        std::cout << "Received PSYNC from replica (fd: " << client_fd << ") with repl_id: " 
+                  << repl_id << " and offset: " << offset << std::endl;
+        
+        // For initial sync (repl_id = "?" and offset = "-1"), respond with FULLRESYNC
+        if (repl_id == "?" && offset == "-1") {
+            // Send FULLRESYNC response with master's replication ID and offset
+            std::string response = "+FULLRESYNC " + master_replid + " " + std::to_string(master_repl_offset) + "\r\n";
+            std::cout << "Sending FULLRESYNC response: " << response;
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else {
+            // For partial sync requests, we don't support them yet
+            std::string response = "-ERR partial sync not supported\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
