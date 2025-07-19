@@ -5,13 +5,13 @@
 #include <vector>
 #include <map>
 #include <chrono>
-#include <fstream>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/select.h>
+#include <fstream>
 #include "redis_parser.hpp"
 #include "redis_commands.hpp"
 
@@ -36,49 +36,67 @@ std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
 }
 
-// Function to read size-encoded value
-uint64_t read_size_encoded(std::ifstream& file, size_t& pos, const std::string& data) {
-    if (pos >= data.length()) {
-        throw std::runtime_error("Invalid RDB: incomplete size encoding");
-    }
-    unsigned char byte = data[pos++];
-    unsigned char first_two_bits = (byte >> 6) & 0x03;
+uint64_t read_size_encoded(std::ifstream& file, char first_byte) {
+    uint8_t first = static_cast<uint8_t>(first_byte);
+    uint8_t type = (first >> 6) & 0x03;
 
-    if (first_two_bits == 0x00) {
-        return byte & 0x3F;
-    } else if (first_two_bits == 0x01) {
-        if (pos >= data.length()) {
-            throw std::runtime_error("Invalid RDB: incomplete 14-bit size encoding");
-        }
-        unsigned char next_byte = data[pos++];
-        return ((byte & 0x3F) << 8) | next_byte;
-    } else if (first_two_bits == 0x10) {
-        if (pos + 3 >= data.length()) {
-            throw std::runtime_error("Invalid RDB: incomplete 32-bit size encoding");
-        }
+    if (type == 0) { // 6-bit size
+        return first & 0x3F;
+    } else if (type == 1) { // 14-bit size
+        char next_byte;
+        file.get(next_byte);
+        return ((first & 0x3F) << 8) | (static_cast<uint8_t>(next_byte));
+    } else if (type == 2) { // 32-bit size
         uint32_t size = 0;
+        char bytes[4];
+        file.read(bytes, 4);
         for (int i = 0; i < 4; ++i) {
-            size = (size << 8) | (unsigned char)data[pos++];
+            size = (size << 8) | static_cast<uint8_t>(bytes[i]);
         }
         return size;
+    } else { // type == 3, special string encoding
+        throw std::runtime_error("Special string encoding not supported");
+    }
+}
+
+std::string read_string_encoded(std::ifstream& file) {
+    char first_byte;
+    file.get(first_byte);
+    uint8_t first = static_cast<uint8_t>(first_byte);
+    uint8_t type = (first >> 6) & 0x03;
+
+    if (type == 3) {
+        uint8_t encoding = first & 0x3F;
+        if (encoding == 0) { // 8-bit integer
+            char byte;
+            file.get(byte);
+            return std::to_string(static_cast<uint8_t>(byte));
+        } else if (encoding == 1) { // 16-bit integer
+            char bytes[2];
+            file.read(bytes, 2);
+            uint16_t value = (static_cast<uint8_t>(bytes[1]) << 8) | static_cast<uint8_t>(bytes[0]);
+            return std::to_string(value);
+        } else if (encoding == 2) { // 32-bit integer
+            char bytes[4];
+            file.read(bytes, 4);
+            uint32_t value = 0;
+            for (int i = 3; i >= 0; --i) {
+                value = (value << 8) | static_cast<uint8_t>(bytes[i]);
+            }
+            return std::to_string(value);
+        } else {
+            throw std::runtime_error("Unsupported string encoding");
+        }
     } else {
-        throw std::runtime_error("Invalid RDB: unsupported size encoding");
+        file.putback(first_byte);
+        uint64_t length = read_size_encoded(file, first_byte);
+        std::string str(length, '\0');
+        file.read(&str[0], length);
+        return str;
     }
 }
 
-// Function to read string-encoded value
-std::string read_string_encoded(std::ifstream& file, size_t& pos, const std::string& data) {
-    uint64_t len = read_size_encoded(file, pos, data);
-    if (pos + len > data.length()) {
-        throw std::runtime_error("Invalid RDB: incomplete string data");
-    }
-    std::string str = data.substr(pos, len);
-    pos += len;
-    return str;
-}
-
-// Function to parse RDB file and populate kv_store
-void parse_rdb_file(const std::string& dir, const std::string& dbfilename) {
+void load_rdb_file(const std::string& dir, const std::string& dbfilename) {
     std::string filepath = dir + "/" + dbfilename;
     std::ifstream file(filepath, std::ios::binary);
     if (!file.is_open()) {
@@ -86,107 +104,74 @@ void parse_rdb_file(const std::string& dir, const std::string& dbfilename) {
         return;
     }
 
-    // Read entire file into string
-    file.seekg(0, std::ios::end);
-    size_t size = file.tellg();
-    std::string data(size, ' ');
-    file.seekg(0);
-    file.read(&data[0], size);
+    // Read header
+    char header[9];
+    file.read(header, 9);
+    if (std::strncmp(header, "REDIS0011", 9) != 0) {
+        file.close();
+        throw std::runtime_error("Invalid RDB file header");
+    }
+
+    // Read metadata and database sections
+    while (file.peek() != EOF && file.peek() != 0xFF) { // Stop at EOF or checksum
+        char byte;
+        file.get(byte);
+        if (byte == (char)0xFA) { // Metadata subsection
+            std::string meta_name = read_string_encoded(file);
+            std::string meta_value = read_string_encoded(file);
+        } else if (byte == (char)0xFE) { // Database subsection
+            uint64_t db_index = read_size_encoded(file, file.get());
+            if (file.peek() == (char)0xFB) {
+                file.get(); // Consume FB
+                uint64_t hash_table_size = read_size_encoded(file, file.get());
+                uint64_t expire_table_size = read_size_encoded(file, file.get());
+
+                for (uint64_t i = 0; i < hash_table_size; ++i) {
+                    bool has_expiry = false;
+                    std::chrono::steady_clock::time_point expiry_time;
+
+                    if (file.peek() == (char)0xFD) { // Expire in seconds
+                        file.get();
+                        char bytes[4];
+                        file.read(bytes, 4);
+                        uint32_t seconds = 0;
+                        for (int j = 3; j >= 0; --j) {
+                            seconds = (seconds << 8) | static_cast<uint8_t>(bytes[j]);
+                        }
+                        expiry_time = std::chrono::steady_clock::time_point(std::chrono::seconds(seconds));
+                        has_expiry = true;
+                    } else if (file.peek() == (char)0xFC) { // Expire in milliseconds
+                        file.get();
+                        char bytes[8];
+                        file.read(bytes, 8);
+                        uint64_t millis = 0;
+                        for (int j = 7; j >= 0; --j) {
+                            millis = (millis << 8) | static_cast<uint8_t>(bytes[j]);
+                        }
+                        expiry_time = std::chrono::steady_clock::time_point(std::chrono::milliseconds(millis));
+                        has_expiry = true;
+                    }
+
+                    char value_type;
+                    file.get(value_type);
+                    if (value_type != 0) {
+                        throw std::runtime_error("Only string type supported");
+                    }
+
+                    std::string key = read_string_encoded(file);
+                    std::string value = read_string_encoded(file);
+
+                    if (has_expiry) {
+                        kv_store[key] = ValueEntry(value, expiry_time);
+                    } else {
+                        kv_store[key] = ValueEntry(value);
+                    }
+                }
+            }
+        }
+    }
+
     file.close();
-
-    size_t pos = 0;
-
-    // Parse header
-    if (pos + 9 > data.length() || data.substr(pos, 9) != "REDIS0011") {
-        throw std::runtime_error("Invalid RDB: incorrect header");
-    }
-    pos += 9;
-
-    // Skip metadata section
-    while (pos < data.length() && data[pos] == 0xFA) {
-        pos++; // Skip FA
-        read_string_encoded(file, pos, data); // Skip metadata name
-        read_string_encoded(file, pos, data); // Skip metadata value
-    }
-
-    // Parse database section
-    while (pos < data.length() && data[pos] == 0xFE) {
-        pos++; // Skip FE
-        uint64_t db_index = read_size_encoded(file, pos, data);
-        if (db_index != 0) {
-            throw std::runtime_error("Only database 0 is supported");
-        }
-
-        if (pos >= data.length() || data[pos] != 0xFB) {
-            throw std::runtime_error("Invalid RDB: missing hash table sizes");
-        }
-        pos++; // Skip FB
-        read_size_encoded(file, pos, data); // Skip key-value hash table size
-        read_size_encoded(file, pos, data); // Skip expires hash table size
-
-        // Parse key-value pairs
-        while (pos < data.length() && data[pos] != 0xFF && data[pos] != 0xFE) {
-            bool has_expiry = false;
-            std::chrono::steady_clock::time_point expiry_time;
-
-            // Check for expiry information
-            if (data[pos] == 0xFC) {
-                pos++; // Skip FC
-                if (pos + 8 > data.length()) {
-                    throw std::runtime_error("Invalid RDB: incomplete millisecond expiry");
-                }
-                uint64_t expiry_ms = 0;
-                for (int i = 7; i >= 0; --i) {
-                    expiry_ms = (expiry_ms << 8) | (unsigned char)data[pos + i];
-                }
-                pos += 8;
-                has_expiry = true;
-                expiry_time = std::chrono::steady_clock::time_point() + std::chrono::milliseconds(expiry_ms);
-            } else if (data[pos] == 0xFD) {
-                pos++; // Skip FD
-                if (pos + 4 > data.length()) {
-                    throw std::runtime_error("Invalid RDB: incomplete second expiry");
-                }
-                uint32_t expiry_sec = 0;
-                for (int i = 3; i >= 0; --i) {
-                    expiry_sec = (expiry_sec << 8) | (unsigned char)data[pos + i];
-                }
-                pos += 4;
-                has_expiry = true;
-                expiry_time = std::chrono::steady_clock::time_point() + 
-                              std::chrono::seconds(expiry_sec);
-            }
-
-            // Read value type
-            if (pos >= data.length()) {
-                throw std::runtime_error("Invalid RDB: missing value type");
-            }
-            unsigned char value_type = data[pos++];
-            if (value_type != 0x00) {
-                throw std::runtime_error("Only string values are supported");
-            }
-
-            // Read key and value
-            std::string key = read_string_encoded(file, pos, data);
-            std::string value = read_string_encoded(file, pos, data);
-
-            // Store in kv_store
-            if (has_expiry) {
-                kv_store[key] = ValueEntry(value, expiry_time);
-            } else {
-                kv_store[key] = ValueEntry(value);
-            }
-        }
-    }
-
-    // End of file section (FF followed by 8-byte checksum)
-    if (pos < data.length() && data[pos] == 0xFF) {
-        pos++; // Skip FF
-        if (pos + 8 > data.length()) {
-            throw std::runtime_error("Invalid RDB: incomplete checksum");
-        }
-        pos += 8; // Skip checksum
-    }
 }
 
 void execute_redis_command(int client_fd, const std::vector<std::string>& parsed_command) {
@@ -197,7 +182,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::string command = parsed_command[0];
 
     if (command == "PING") {
-        std::string response = "+PONG\r\n";
+        std::string response = "+PONG  \r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "ECHO" && parsed_command.size() == 2) {
         std::string arg = parsed_command[1];
@@ -269,19 +254,13 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                               std::to_string(param_value.length()) + "\r\n" + param_value + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "KEYS" && parsed_command.size() == 2 && parsed_command[1] == "*") {
-        std::vector<std::string> valid_keys;
-        auto current_time = get_current_time();
-        for (auto it = kv_store.begin(); it != kv_store.end();) {
-            if (it->second.has_expiry && current_time > it->second.expiry) {
-                it = kv_store.erase(it);
+        std::string response = "*" + std::to_string(kv_store.size()) + "\r\n";
+        for (const auto& pair : kv_store) {
+            if (!pair.second.has_expiry || get_current_time() <= pair.second.expiry) {
+                response += "$" + std::to_string(pair.first.length()) + "\r\n" + pair.first + "\r\n";
             } else {
-                valid_keys.push_back(it->first);
-                ++it;
+                kv_store.erase(pair.first);
             }
-        }
-        std::string response = "*" + std::to_string(valid_keys.size()) + "\r\n";
-        for (const auto& key : valid_keys) {
-            response += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
         }
         send(client_fd, response.c_str(), response.length(), 0);
     } else {
@@ -308,11 +287,9 @@ int main(int argc, char **argv) {
 
     // Load RDB file
     try {
-        parse_rdb_file(config.dir, config.dbfilename);
+        load_rdb_file(config.dir, config.dbfilename);
     } catch (const std::exception& e) {
-        std::cerr << "Error parsing RDB file: " << e.what() << "\n";
-        // Continue with empty database if RDB parsing fails
-        kv_store.clear();
+        std::cerr << "Error loading RDB file: " << e.what() << "\n";
     }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
