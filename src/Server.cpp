@@ -190,10 +190,31 @@ void connect_to_master() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to REPLCONF capa: " << response_buffer << std::endl;
     
-    std::cout << "Handshake phase 2 completed successfully" << std::endl;
+    // Step 4: Send PSYNC command (? -1 for initial sync)
+    std::string psync_command = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
     
-    // Keep the connection open for future stages (PSYNC)
-    // For now, we'll close it since we're only implementing the REPLCONF part
+    if (send(master_fd, psync_command.c_str(), psync_command.length(), 0) < 0) {
+        std::cerr << "Failed to send PSYNC to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent PSYNC ? -1 to master" << std::endl;
+    
+    // Wait for FULLRESYNC response
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive FULLRESYNC from master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response to PSYNC: " << response_buffer << std::endl;
+    
+    std::cout << "Handshake completed successfully" << std::endl;
+    
+    // Keep the connection open for future stages
+    // For now, we'll close it since we're only implementing the PSYNC part
     close(master_fd);
 }
 
