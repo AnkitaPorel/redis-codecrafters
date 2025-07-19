@@ -125,7 +125,7 @@ void connect_to_master() {
     
     std::cout << "Connected to master successfully" << std::endl;
     
-    // Send PING command as part of handshake
+    // Step 1: Send PING command as part of handshake
     std::string ping_command = "*1\r\n$4\r\nPING\r\n";
     if (send(master_fd, ping_command.c_str(), ping_command.length(), 0) < 0) {
         std::cerr << "Failed to send PING to master" << std::endl;
@@ -138,13 +138,62 @@ void connect_to_master() {
     // Wait for PONG response
     char response_buffer[1024];
     int bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
-    if (bytes_received > 0) {
-        response_buffer[bytes_received] = '\0';
-        std::cout << "Received response from master: " << response_buffer << std::endl;
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive PONG from master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response from master: " << response_buffer << std::endl;
+    
+    // Step 2: Send first REPLCONF command (listening-port)
+    std::string port_str = std::to_string(server_port);
+    std::string replconf_port_command = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + 
+                                       std::to_string(port_str.length()) + "\r\n" + port_str + "\r\n";
+    
+    if (send(master_fd, replconf_port_command.c_str(), replconf_port_command.length(), 0) < 0) {
+        std::cerr << "Failed to send REPLCONF listening-port to master" << std::endl;
+        close(master_fd);
+        return;
     }
     
-    // Keep the connection open for future stages
-    // For now, we'll close it since we're only implementing the PING part
+    std::cout << "Sent REPLCONF listening-port " << server_port << " to master" << std::endl;
+    
+    // Wait for OK response to first REPLCONF
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive OK from master for REPLCONF listening-port" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response to REPLCONF listening-port: " << response_buffer << std::endl;
+    
+    // Step 3: Send second REPLCONF command (capa psync2)
+    std::string replconf_capa_command = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+    
+    if (send(master_fd, replconf_capa_command.c_str(), replconf_capa_command.length(), 0) < 0) {
+        std::cerr << "Failed to send REPLCONF capa psync2 to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent REPLCONF capa psync2 to master" << std::endl;
+    
+    // Wait for OK response to second REPLCONF
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive OK from master for REPLCONF capa" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response to REPLCONF capa: " << response_buffer << std::endl;
+    
+    std::cout << "Handshake phase 2 completed successfully" << std::endl;
+    
+    // Keep the connection open for future stages (PSYNC)
+    // For now, we'll close it since we're only implementing the REPLCONF part
     close(master_fd);
 }
 
