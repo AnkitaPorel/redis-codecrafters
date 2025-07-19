@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <iostream>
 
-#include "config.hpp"
+#include "redis_commands.hpp"
 
 class RDBParser {
 public:
