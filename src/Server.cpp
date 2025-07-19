@@ -38,6 +38,8 @@ std::chrono::steady_clock::time_point get_current_time() {
 
 void load_rdb_file() {
     std::string filepath = config.dir + "/" + config.dbfilename;
+    std::cout << "Attempting to load RDB file from: " << filepath << std::endl;
+    
     RDBParser parser;
     
     try {
@@ -56,7 +58,13 @@ void load_rdb_file() {
         }
         
         if (!rdb_data.empty()) {
-            std::cout << "Loaded " << rdb_data.size() << " keys from RDB file: " << filepath << std::endl;
+            std::cout << "Successfully loaded " << rdb_data.size() << " keys from RDB file" << std::endl;
+            // Print all loaded keys for debugging
+            for (const auto& pair : kv_store) {
+                std::cout << "  Key: '" << pair.first << "' -> Value: '" << pair.second.value << "'" << std::endl;
+            }
+        } else {
+            std::cout << "No keys found in RDB file or file doesn't exist" << std::endl;
         }
     } catch (const std::exception& e) {
         std::cerr << "Error loading RDB file: " << e.what() << std::endl;
@@ -113,19 +121,26 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "GET" && parsed_command.size() == 2) {
         std::string key = parsed_command[1];
+        std::cout << "GET request for key: '" << key << "'" << std::endl;
+        
         auto it = kv_store.find(key);
         std::string response;
         if (it != kv_store.end()) {
+            // Check if key has expired
             if (it->second.has_expiry && get_current_time() > it->second.expiry) {
+                std::cout << "Key '" << key << "' has expired, removing from store" << std::endl;
                 kv_store.erase(it);
-                response = "$-1\r\n";
+                response = "$-1\r\n"; // Null bulk string (key not found)
             } else {
                 std::string value = it->second.value;
+                std::cout << "Found key '" << key << "' with value: '" << value << "'" << std::endl;
                 response = "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
             }
         } else {
-            response = "$-1\r\n";
+            std::cout << "Key '" << key << "' not found in store" << std::endl;
+            response = "$-1\r\n"; // Null bulk string (key not found)
         }
+        std::cout << "Sending response: " << response << std::endl;
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "KEYS" && parsed_command.size() == 2) {
         std::string pattern = parsed_command[1];

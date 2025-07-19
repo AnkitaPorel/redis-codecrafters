@@ -84,7 +84,7 @@ private:
         uint8_t type = (first_byte & 0xC0) >> 6;
 
         if (type != 0b11) {
-            // Regular string with size encoding
+            // Regular length-prefixed string with size encoding
             pos--; // Put back the byte
             uint32_t size = read_size_encoding();
             
@@ -97,7 +97,9 @@ private:
             return result;
         }
 
-        // Special string encoding
+        // Special string encoding (integers as strings)
+        // For this stage, we only support length-prefixed strings
+        // But keeping this for completeness
         uint8_t encoding_type = first_byte & 0x3F;
         
         switch (encoding_type) {
@@ -119,8 +121,12 @@ private:
                 return std::to_string(static_cast<int32_t>(val));
             }
             
+            case 0x03: { // LZF compressed string
+                throw std::runtime_error("LZF compressed strings not supported in this stage");
+            }
+            
             default:
-                throw std::runtime_error("Unsupported string encoding type");
+                throw std::runtime_error("Unsupported string encoding type: " + std::to_string(encoding_type));
         }
     }
 
@@ -144,6 +150,7 @@ public:
         std::ifstream file(filepath, std::ios::binary);
         if (!file) {
             // File doesn't exist, return empty map
+            std::cout << "RDB file not found: " << filepath << " (treating database as empty)" << std::endl;
             return result;
         }
 
@@ -157,12 +164,15 @@ public:
         file.close();
 
         if (data.empty()) {
+            std::cout << "RDB file is empty: " << filepath << std::endl;
             return result;
         }
 
         pos = 0;
 
         try {
+            std::cout << "Parsing RDB file: " << filepath << std::endl;
+            
             // Parse header
             if (pos + 9 > data.size()) {
                 throw std::runtime_error("File too small for header");
@@ -172,11 +182,12 @@ public:
             pos += 5;
             
             if (magic != "REDIS") {
-                throw std::runtime_error("Invalid RDB magic string");
+                throw std::runtime_error("Invalid RDB magic string: " + magic);
             }
             
             std::string version(data.begin() + pos, data.begin() + pos + 4);
             pos += 4;
+            std::cout << "RDB version: " << version << std::endl;
             
             // Skip metadata section
             skip_metadata_section();
@@ -186,17 +197,21 @@ public:
                 uint8_t marker = read_byte();
                 
                 if (marker == 0xFF) { // End of file
+                    std::cout << "Reached end of RDB file" << std::endl;
                     break;
                 }
                 
                 if (marker == 0xFE) { // Database selector
                     uint32_t db_index = read_size_encoding();
+                    std::cout << "Processing database index: " << db_index << std::endl;
                     
                     // Check for hash table size info
                     if (pos < data.size() && data[pos] == 0xFB) {
                         read_byte(); // Skip 0xFB
                         uint32_t hash_table_size = read_size_encoding();
                         uint32_t expire_hash_table_size = read_size_encoding();
+                        std::cout << "Hash table size: " << hash_table_size 
+                                  << ", Expire hash table size: " << expire_hash_table_size << std::endl;
                     }
                     
                     // Parse key-value pairs
@@ -215,6 +230,7 @@ public:
                         if (next_byte == 0xFC) { // Millisecond timestamp
                             read_byte(); // Skip 0xFC
                             uint64_t expire_ms = read_uint64_le();
+                            std::cout << "Key has expiry in milliseconds: " << expire_ms << std::endl;
                             
                             // Convert Unix timestamp to steady_clock time
                             auto unix_epoch = std::chrono::system_clock::from_time_t(0);
@@ -227,6 +243,7 @@ public:
                         } else if (next_byte == 0xFD) { // Second timestamp
                             read_byte(); // Skip 0xFD
                             uint32_t expire_sec = read_uint32_le();
+                            std::cout << "Key has expiry in seconds: " << expire_sec << std::endl;
                             
                             // Convert Unix timestamp to steady_clock time
                             auto unix_epoch = std::chrono::system_clock::from_time_t(0);
@@ -242,12 +259,15 @@ public:
                         uint8_t value_type = read_byte();
                         
                         if (value_type != 0x00) { // Only support string type for now
-                            throw std::runtime_error("Unsupported value type");
+                            throw std::runtime_error("Unsupported value type: " + std::to_string(value_type));
                         }
                         
-                        // Parse key and value
+                        // Parse key and value (both are length-prefixed strings)
                         std::string key = read_string_encoding();
                         std::string value = read_string_encoding();
+                        
+                        std::cout << "Loaded key: '" << key << "' -> value: '" << value << "'" 
+                                  << (has_expiry ? " (with expiry)" : " (no expiry)") << std::endl;
                         
                         if (has_expiry) {
                             result[key] = RDBValueEntry(value, expiry_time);
@@ -257,8 +277,12 @@ public:
                     }
                 }
             }
+            
+            std::cout << "Successfully loaded " << result.size() << " keys from RDB file" << std::endl;
+            
         } catch (const std::exception& e) {
             std::cerr << "Error parsing RDB file: " << e.what() << std::endl;
+            std::cerr << "Position in file: " << pos << "/" << data.size() << std::endl;
             // Return what we parsed so far
         }
         
