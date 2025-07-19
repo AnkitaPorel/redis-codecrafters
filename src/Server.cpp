@@ -36,7 +36,9 @@ std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
 }
 
-uint64_t read_size_encoded(std::ifstream& file, char first_byte) {
+uint64_t read_size_encoded(std::ifstream& file) {
+    char first_byte;
+    file.get(first_byte);
     uint8_t first = static_cast<uint8_t>(first_byte);
     uint8_t type = (first >> 6) & 0x03;
 
@@ -45,7 +47,7 @@ uint64_t read_size_encoded(std::ifstream& file, char first_byte) {
     } else if (type == 1) { // 14-bit size
         char next_byte;
         file.get(next_byte);
-        return ((first & 0x3F) << 8) | (static_cast<uint8_t>(next_byte));
+        return ((first & 0x3F) << 8) | static_cast<uint8_t>(next_byte);
     } else if (type == 2) { // 32-bit size
         uint32_t size = 0;
         char bytes[4];
@@ -89,7 +91,7 @@ std::string read_string_encoded(std::ifstream& file) {
         }
     } else {
         file.putback(first_byte);
-        uint64_t length = read_size_encoded(file, first_byte);
+        uint64_t length = read_size_encoded(file);
         std::string str(length, '\0');
         file.read(&str[0], length);
         return str;
@@ -120,11 +122,11 @@ void load_rdb_file(const std::string& dir, const std::string& dbfilename) {
             std::string meta_name = read_string_encoded(file);
             std::string meta_value = read_string_encoded(file);
         } else if (byte == (char)0xFE) { // Database subsection
-            uint64_t db_index = read_size_encoded(file, file.get());
+            uint64_t db_index = read_size_encoded(file);
             if (file.peek() == (char)0xFB) {
                 file.get(); // Consume FB
-                uint64_t hash_table_size = read_size_encoded(file, file.get());
-                uint64_t expire_table_size = read_size_encoded(file, file.get());
+                uint64_t hash_table_size = read_size_encoded(file);
+                uint64_t expire_table_size = read_size_encoded(file);
 
                 for (uint64_t i = 0; i < hash_table_size; ++i) {
                     bool has_expiry = false;
@@ -138,7 +140,9 @@ void load_rdb_file(const std::string& dir, const std::string& dbfilename) {
                         for (int j = 3; j >= 0; --j) {
                             seconds = (seconds << 8) | static_cast<uint8_t>(bytes[j]);
                         }
-                        expiry_time = std::chrono::steady_clock::time_point(std::chrono::seconds(seconds));
+                        // Convert Unix timestamp (seconds) to steady_clock
+                        auto duration = std::chrono::seconds(seconds);
+                        expiry_time = std::chrono::steady_clock::time_point(duration);
                         has_expiry = true;
                     } else if (file.peek() == (char)0xFC) { // Expire in milliseconds
                         file.get();
@@ -148,7 +152,9 @@ void load_rdb_file(const std::string& dir, const std::string& dbfilename) {
                         for (int j = 7; j >= 0; --j) {
                             millis = (millis << 8) | static_cast<uint8_t>(bytes[j]);
                         }
-                        expiry_time = std::chrono::steady_clock::time_point(std::chrono::milliseconds(millis));
+                        // Convert Unix timestamp (milliseconds) to steady_clock
+                        auto duration = std::chrono::milliseconds(millis);
+                        expiry_time = std::chrono::steady_clock::time_point(duration);
                         has_expiry = true;
                     }
 
@@ -182,7 +188,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::string command = parsed_command[0];
 
     if (command == "PING") {
-        std::string response = "+PONG  \r\n";
+        std::string response = "+PONG\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "ECHO" && parsed_command.size() == 2) {
         std::string arg = parsed_command[1];
@@ -232,7 +238,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 response = "$-1\r\n";
             } else {
                 std::string value = it->second.value;
-                response = "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
+                response = "$" + std::to_string( value.length()) + "\r\n" + value + "\r\n";
             }
         } else {
             response = "$-1\r\n";
@@ -254,13 +260,18 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                               std::to_string(param_value.length()) + "\r\n" + param_value + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "KEYS" && parsed_command.size() == 2 && parsed_command[1] == "*") {
-        std::string response = "*" + std::to_string(kv_store.size()) + "\r\n";
-        for (const auto& pair : kv_store) {
-            if (!pair.second.has_expiry || get_current_time() <= pair.second.expiry) {
-                response += "$" + std::to_string(pair.first.length()) + "\r\n" + pair.first + "\r\n";
+        std::vector<std::string> valid_keys;
+        for (auto it = kv_store.begin(); it != kv_store.end();) {
+            if (it->second.has_expiry && get_current_time() > it->second.expiry) {
+                it = kv_store.erase(it);
             } else {
-                kv_store.erase(pair.first);
+                valid_keys.push_back(it->first);
+                ++it;
             }
+        }
+        std::string response = "*" + std::to_string(valid_keys.size()) + "\r\n";
+        for (const auto& key : valid_keys) {
+            response += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
         }
         send(client_fd, response.c_str(), response.length(), 0);
     } else {
@@ -314,8 +325,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int connection_backlog = 5;
-    if (listen(server_fd, connection_backlog) != 0) {
+    int connection_backDown = 5;
+    if (listen(server_fd, connection_backDown) != 0) {
         std::cerr << "listen failed\n";
         return 1;
     }
@@ -360,7 +371,7 @@ int main(int argc, char **argv) {
             int client_fd = *it;
             if (FD_ISSET(client_fd, &read_fds)) {
                 char buffer[4096];
-                int bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+                int bytes_received = recv(client_fd, buffer, sizeof(buffer - 1), 0);
 
                 if (bytes_received <= 0) {
                     std::cout << "Client disconnected (fd: " << client_fd << ")\n";
