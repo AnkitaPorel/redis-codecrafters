@@ -184,6 +184,24 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "*2\r\n$" + std::to_string(param.length()) + "\r\n" + param + "\r\n$" + 
                               std::to_string(param_value.length()) + "\r\n" + param_value + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "INFO" && parsed_command.size() == 2) {
+        std::string section = parsed_command[1];
+        
+        // Convert section to lowercase for case-insensitive comparison
+        for (char& c : section) {
+            c = std::tolower(c);
+        }
+        
+        if (section == "replication") {
+            // For now, we're always a master with basic replication info
+            std::string info_content = "role:master\r\n";
+            std::string response = "$" + std::to_string(info_content.length()) + "\r\n" + info_content;
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else {
+            // Only support replication section for now
+            std::string response = "-ERR unsupported INFO section\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
