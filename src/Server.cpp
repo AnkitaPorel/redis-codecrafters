@@ -423,6 +423,11 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             // Send binary RDB data (no trailing \r\n)
             std::cout << "Sending RDB file data (" << rdb_data.size() << " bytes)" << std::endl;
             send(client_fd, rdb_data.data(), rdb_data.size(), 0);
+        } else {
+            // For partial sync requests, we don't support them yet
+            std::string response = "-ERR partial sync not supported\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
