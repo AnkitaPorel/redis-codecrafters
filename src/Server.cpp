@@ -390,7 +390,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             send(client_fd, response.c_str(), response.length(), 0);
         }
     } else if (command == "PSYNC" && parsed_command.size() == 3) {
-        // Handle PSYNC command from replicas
         std::string repl_id = parsed_command[1];  // Should be "?" for initial sync
         std::string offset = parsed_command[2];   // Should be "-1" for initial sync
         
@@ -403,11 +402,27 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             std::string response = "+FULLRESYNC " + master_replid + " " + std::to_string(master_repl_offset) + "\r\n";
             std::cout << "Sending FULLRESYNC response: " << response;
             send(client_fd, response.c_str(), response.length(), 0);
-        } else {
-            // For partial sync requests, we don't support them yet
-            std::string response = "-ERR partial sync not supported\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-        }
+            
+            // After FULLRESYNC, send an empty RDB file
+            // This is a hex representation of an empty RDB file
+            std::string rdb_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
+            
+            // Convert hex string to binary
+            std::vector<uint8_t> rdb_data;
+            for (size_t i = 0; i < rdb_hex.length(); i += 2) {
+                std::string hex_byte = rdb_hex.substr(i, 2);
+                uint8_t byte = static_cast<uint8_t>(std::stoul(hex_byte, nullptr, 16));
+                rdb_data.push_back(byte);
+            }
+            
+            // Send RDB file in format: $<length>\r\n<binary_contents>
+            std::string rdb_header = "$" + std::to_string(rdb_data.size()) + "\r\n";
+            std::cout << "Sending RDB file header: " << rdb_header;
+            send(client_fd, rdb_header.c_str(), rdb_header.length(), 0);
+            
+            // Send binary RDB data (no trailing \r\n)
+            std::cout << "Sending RDB file data (" << rdb_data.size() << " bytes)" << std::endl;
+            send(client_fd, rdb_data.data(), rdb_data.size(), 0);
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
