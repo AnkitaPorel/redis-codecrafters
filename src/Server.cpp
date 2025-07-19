@@ -43,6 +43,9 @@ int master_port;
 std::string master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"; // 40 character hardcoded replication ID
 int master_repl_offset = 0;
 
+// Store replica information
+std::map<int, std::map<std::string, std::string>> replica_info; // client_fd -> replica config
+
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
 }
@@ -354,6 +357,38 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             std::string response = "-ERR unsupported INFO section\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         }
+    } else if (command == "REPLCONF" && parsed_command.size() >= 3) {
+        // Handle REPLCONF command from replicas
+        std::string subcommand = parsed_command[1];
+        
+        // Convert subcommand to lowercase for comparison
+        for (char& c : subcommand) {
+            c = std::tolower(c);
+        }
+        
+        if (subcommand == "listening-port" && parsed_command.size() == 3) {
+            // Store the replica's listening port
+            std::string port = parsed_command[2];
+            replica_info[client_fd]["listening-port"] = port;
+            std::cout << "Replica (fd: " << client_fd << ") listening on port: " << port << std::endl;
+            
+            // Respond with OK
+            std::string response = "+OK\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else if (subcommand == "capa" && parsed_command.size() == 3) {
+            // Store the replica's capabilities
+            std::string capability = parsed_command[2];
+            replica_info[client_fd]["capa"] = capability;
+            std::cout << "Replica (fd: " << client_fd << ") capability: " << capability << std::endl;
+            
+            // Respond with OK
+            std::string response = "+OK\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else {
+            // Unsupported REPLCONF subcommand
+            std::string response = "-ERR unsupported REPLCONF subcommand\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -500,6 +535,8 @@ int main(int argc, char **argv) {
 
                 if (bytes_received <= 0) {
                     std::cout << "Client disconnected (fd: " << client_fd << ")\n";
+                    // Clean up replica info when client disconnects
+                    replica_info.erase(client_fd);
                     close(client_fd);
                     it = client_fds.erase(it);
                     continue;
