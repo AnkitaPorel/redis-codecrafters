@@ -13,7 +13,6 @@
 #include <sys/select.h>
 #include "redis_parser.hpp"
 #include "redis_commands.hpp"
-#include "rdb_parser.hpp"
 
 struct ValueEntry {
     std::string value;
@@ -31,28 +30,13 @@ struct ValueEntry {
 
 std::map<std::string, ValueEntry> kv_store;
 ServerConfig config;
-std::vector<std::string> rdb_keys;
 
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
 }
 
-std::vector<std::string> get_all_keys() {
-    std::vector<std::string> keys = rdb_keys;
-    for (const auto& entry : kv_store) {
-        if (!entry.second.has_expiry || get_current_time() <= entry.second.expiry) {
-            if (std::find(keys.begin(), keys.end(), entry.first) == keys.end()) {
-                keys.push_back(entry.first);
-            }
-        }
-    }
-    return keys;
-}
-
 void execute_redis_command(int client_fd, const std::vector<std::string>& parsed_command) {
     if (parsed_command.empty()) {
-        std::string response = "-ERR empty command\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
 
@@ -130,15 +114,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "*2\r\n$" + std::to_string(param.length()) + "\r\n" + param + "\r\n$" + 
                               std::to_string(param_value.length()) + "\r\n" + param_value + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
-    } else if (command == "KEYS" && parsed_command.size() == 2 && parsed_command[1] == "*") {
-        std::vector<std::string> keys = get_all_keys();
-        std::string response = "*" + std::to_string(keys.size()) + "\r\n";
-        for (const auto& key : keys) {
-            response += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
-        }
-        if (send(client_fd, response.c_str(), response.length(), 0) == -1) {
-            std::cerr << "Failed to send KEYS response\n";
-        }
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -149,7 +124,6 @@ int main(int argc, char **argv) {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
-    // Parse command-line arguments
     for (int i = 1; i < argc; i += 2) {
         std::string arg = argv[i];
         if (i + 1 < argc) {
@@ -159,13 +133,6 @@ int main(int argc, char **argv) {
                 config.dbfilename = argv[i + 1];
             }
         }
-    }
-
-    try {
-        rdb_keys = RDBParser::load_keys(config);
-    } catch (const std::exception& e) {
-        std::cerr << "Failed to load RDB file: " << e.what() << "\n";
-        rdb_keys.clear();
     }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
