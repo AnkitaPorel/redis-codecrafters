@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <iostream>
 
+#include "config.hpp"
+
 class RDBParser {
 public:
     static std::vector<std::string> load_keys(const ServerConfig& config) {
@@ -121,10 +123,9 @@ public:
                 }
                 std::cerr << "Read AUX value: " << aux_value << "\n";
             } else {
+                file.close();
                 std::cerr << "Unknown opcode: 0x" << std::hex << (int)(unsigned char)opcode 
                           << std::dec << " at position " << file.tellg() << "\n";
-                // Do not skip blindly; throw error to prevent misaligning
-                file.close();
                 throw std::runtime_error("Unknown RDB opcode: " + std::to_string((int)(unsigned char)opcode));
             }
         }
@@ -167,12 +168,11 @@ private:
                      ((uint8_t)buffer[2] << 8) | (uint8_t)buffer[3];
             std::cerr << "32-bit length: " << length << "\n";
             return length;
-        } else if (format == 3) { // Special encoding
-            // For this stage, special encodings (e.g., compressed strings) are not expected
-            std::cerr << "Encountered special length encoding (format 3), treating as invalid for this stage\n";
-            return 0xFFFFFFFF;
+        } else { // format == 3, special encoding
+            // For this stage, treat as string length (read as 8-bit integer)
+            std::cerr << "Special length encoding (format 3), treating as 8-bit integer\n";
+            return (uint8_t)first_byte; // Use the first byte as the length
         }
-        std::cerr << "Invalid length format: " << (int)format << "\n";
         return 0xFFFFFFFF;
     }
 };
