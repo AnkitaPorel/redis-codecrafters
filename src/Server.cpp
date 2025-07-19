@@ -194,8 +194,8 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         
         if (section == "replication") {
             // For now, we're always a master with basic replication info
-            std::string info_content = "role:master\r\n";
-            std::string response = "$" + std::to_string(info_content.length()) + "\r\n" + info_content;
+            std::string info_content = "role:master";
+            std::string response = "$" + std::to_string(info_content.length()) + "\r\n" + info_content + "\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         } else {
             // Only support replication section for now
