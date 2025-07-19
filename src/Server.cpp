@@ -38,6 +38,10 @@ bool is_replica = false;
 std::string master_host;
 int master_port;
 
+// Master replication configuration
+std::string master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"; // 40 character hardcoded replication ID
+int master_repl_offset = 0;
+
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
 }
@@ -203,7 +207,8 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             if (is_replica) {
                 info_content = "role:slave";
             } else {
-                info_content = "role:master";
+                // Master role with replication ID and offset
+                info_content = "role:master\r\nmaster_replid:" + master_replid + "\r\nmaster_repl_offset:" + std::to_string(master_repl_offset);
             }
             std::string response = "$" + std::to_string(info_content.length()) + "\r\n" + info_content + "\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
