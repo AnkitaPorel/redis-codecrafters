@@ -39,6 +39,8 @@ std::chrono::steady_clock::time_point get_current_time() {
 
 void execute_redis_command(int client_fd, const std::vector<std::string>& parsed_command) {
     if (parsed_command.empty()) {
+        std::string response = "-ERR empty command\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
 
@@ -74,7 +76,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                     kv_store[key] = ValueEntry(value, expiry_time);
                 } catch (const std::exception& e) {
                     std::string response = "-ERR invalid expire time\r\n";
-                    send(client_fd, response.c_str(), response.length(), 0);
+ test                    send(client_fd, response.c_str(), response.length(), 0);
                     return;
                 }
             } else {
@@ -117,7 +119,12 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                               std::to_string(param_value.length()) + "\r\n" + param_value + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "KEYS" && parsed_command.size() == 2 && parsed_command[1] == "*") {
-        std::string response = "*1\r\n$" + std::to_string(rdb_keys[0].length()) + "\r\n" + rdb_keys[0] + "\r\n";
+        std::string response;
+        if (rdb_keys.empty()) {
+            response = "*0\r\n";
+        } else {
+            response = "*1\r\n$" + std::to_string(rdb_keys[0].length()) + "\r\n" + rdb_keys[0] + "\r\n";
+        }
         send(client_fd, response.c_str(), response.length(), 0);
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
@@ -145,9 +152,8 @@ int main(int argc, char **argv) {
     try {
         rdb_keys = RDBParser::load_keys(config);
     } catch (const std::exception& e) {
-        std::cerr << "Failed to load RDB file: " << e.what() << "\n";
-        // Continue with empty keys if file is invalid
-        rdb_keys.clear();
+        std::cerr << "Failed to load RDB file: " + std::string(e.what()) + "\n";
+        rdb_keys.clear(); // Ensure rdb_keys is empty on failure
     }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -221,7 +227,7 @@ int main(int argc, char **argv) {
                 int bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
                 if (bytes_received <= 0) {
-                    std::cout << "Client disconnected (fd: " << client_fd << ")\n";
+                    std::cout << "Client disconnected (fd: " << client_fd <<\";)\n";
                     close(client_fd);
                     it = client_fds.erase(it);
                     continue;
