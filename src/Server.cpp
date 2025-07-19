@@ -32,19 +32,16 @@ struct ValueEntry {
 
 std::map<std::string, ValueEntry> kv_store;
 ServerConfig config;
-int server_port = 6379; // Default port
+int server_port = 6379;
 
-// Replica configuration
 bool is_replica = false;
 std::string master_host;
 int master_port;
 
-// Master replication configuration
-std::string master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"; // 40 character hardcoded replication ID
+std::string master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 int master_repl_offset = 0;
 
-// Store replica information
-std::map<int, std::map<std::string, std::string>> replica_info; // client_fd -> replica config
+std::map<int, std::map<std::string, std::string>> replica_info;
 
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
@@ -59,7 +56,6 @@ void load_rdb_file() {
     try {
         auto rdb_data = parser.parse_rdb_file(filepath);
         
-        // Convert RDBValueEntry to ValueEntry and load into kv_store
         for (const auto& pair : rdb_data) {
             const std::string& key = pair.first;
             const RDBValueEntry& rdb_entry = pair.second;
@@ -73,7 +69,6 @@ void load_rdb_file() {
         
         if (!rdb_data.empty()) {
             std::cout << "Successfully loaded " << rdb_data.size() << " keys from RDB file" << std::endl;
-            // Print all loaded keys for debugging
             for (const auto& pair : kv_store) {
                 std::cout << "  Key: '" << pair.first << "' -> Value: '" << pair.second.value << "'" << std::endl;
             }
@@ -92,24 +87,20 @@ void connect_to_master() {
     
     std::cout << "Connecting to master at " << master_host << ":" << master_port << std::endl;
     
-    // Create socket for connecting to master
     int master_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (master_fd < 0) {
         std::cerr << "Failed to create socket for master connection" << std::endl;
         return;
     }
     
-    // Resolve master host
     struct sockaddr_in master_addr;
     memset(&master_addr, 0, sizeof(master_addr));
     master_addr.sin_family = AF_INET;
     master_addr.sin_port = htons(master_port);
     
-    // Handle localhost and IP addresses
     if (master_host == "localhost") {
         master_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     } else if (inet_aton(master_host.c_str(), &master_addr.sin_addr) == 0) {
-        // Try to resolve hostname
         struct hostent *host_entry = gethostbyname(master_host.c_str());
         if (host_entry == nullptr) {
             std::cerr << "Failed to resolve master hostname: " << master_host << std::endl;
@@ -119,7 +110,6 @@ void connect_to_master() {
         memcpy(&master_addr.sin_addr, host_entry->h_addr_list[0], host_entry->h_length);
     }
     
-    // Connect to master
     if (connect(master_fd, (struct sockaddr*)&master_addr, sizeof(master_addr)) < 0) {
         std::cerr << "Failed to connect to master at " << master_host << ":" << master_port << std::endl;
         close(master_fd);
@@ -128,7 +118,6 @@ void connect_to_master() {
     
     std::cout << "Connected to master successfully" << std::endl;
     
-    // Step 1: Send PING command as part of handshake
     std::string ping_command = "*1\r\n$4\r\nPING\r\n";
     if (send(master_fd, ping_command.c_str(), ping_command.length(), 0) < 0) {
         std::cerr << "Failed to send PING to master" << std::endl;
@@ -138,7 +127,6 @@ void connect_to_master() {
     
     std::cout << "Sent PING to master" << std::endl;
     
-    // Wait for PONG response
     char response_buffer[1024];
     int bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
     if (bytes_received <= 0) {
@@ -149,7 +137,6 @@ void connect_to_master() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response from master: " << response_buffer << std::endl;
     
-    // Step 2: Send first REPLCONF command (listening-port)
     std::string port_str = std::to_string(server_port);
     std::string replconf_port_command = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + 
                                        std::to_string(port_str.length()) + "\r\n" + port_str + "\r\n";
@@ -162,7 +149,6 @@ void connect_to_master() {
     
     std::cout << "Sent REPLCONF listening-port " << server_port << " to master" << std::endl;
     
-    // Wait for OK response to first REPLCONF
     bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
     if (bytes_received <= 0) {
         std::cerr << "Failed to receive OK from master for REPLCONF listening-port" << std::endl;
@@ -172,7 +158,6 @@ void connect_to_master() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to REPLCONF listening-port: " << response_buffer << std::endl;
     
-    // Step 3: Send second REPLCONF command (capa psync2)
     std::string replconf_capa_command = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
     
     if (send(master_fd, replconf_capa_command.c_str(), replconf_capa_command.length(), 0) < 0) {
@@ -183,7 +168,6 @@ void connect_to_master() {
     
     std::cout << "Sent REPLCONF capa psync2 to master" << std::endl;
     
-    // Wait for OK response to second REPLCONF
     bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
     if (bytes_received <= 0) {
         std::cerr << "Failed to receive OK from master for REPLCONF capa" << std::endl;
@@ -193,7 +177,6 @@ void connect_to_master() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to REPLCONF capa: " << response_buffer << std::endl;
     
-    // Step 4: Send PSYNC command (? -1 for initial sync)
     std::string psync_command = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
     
     if (send(master_fd, psync_command.c_str(), psync_command.length(), 0) < 0) {
@@ -204,7 +187,6 @@ void connect_to_master() {
     
     std::cout << "Sent PSYNC ? -1 to master" << std::endl;
     
-    // Wait for FULLRESYNC response
     bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
     if (bytes_received <= 0) {
         std::cerr << "Failed to receive FULLRESYNC from master" << std::endl;
@@ -216,8 +198,6 @@ void connect_to_master() {
     
     std::cout << "Handshake completed successfully" << std::endl;
     
-    // Keep the connection open for future stages
-    // For now, we'll close it since we're only implementing the PSYNC part
     close(master_fd);
 }
 
@@ -276,11 +256,10 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         auto it = kv_store.find(key);
         std::string response;
         if (it != kv_store.end()) {
-            // Check if key has expired
             if (it->second.has_expiry && get_current_time() > it->second.expiry) {
                 std::cout << "Key '" << key << "' has expired, removing from store" << std::endl;
                 kv_store.erase(it);
-                response = "$-1\r\n"; // Null bulk string (key not found)
+                response = "$-1\r\n";
             } else {
                 std::string value = it->second.value;
                 std::cout << "Found key '" << key << "' with value: '" << value << "'" << std::endl;
@@ -288,7 +267,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
         } else {
             std::cout << "Key '" << key << "' not found in store" << std::endl;
-            response = "$-1\r\n"; // Null bulk string (key not found)
+            response = "$-1\r\n";
         }
         std::cout << "Sending response: " << response << std::endl;
         send(client_fd, response.c_str(), response.length(), 0);
@@ -296,7 +275,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string pattern = parsed_command[1];
         
         if (pattern == "*") {
-            // Remove expired keys first
             auto current_time = get_current_time();
             for (auto it = kv_store.begin(); it != kv_store.end();) {
                 if (it->second.has_expiry && current_time > it->second.expiry) {
@@ -306,7 +284,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 }
             }
             
-            // Build response array
             std::string response = "*" + std::to_string(kv_store.size()) + "\r\n";
             for (const auto& pair : kv_store) {
                 const std::string& key = pair.first;
@@ -314,7 +291,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
             send(client_fd, response.c_str(), response.length(), 0);
         } else {
-            // For now, only support "*" pattern
             std::string response = "-ERR pattern not supported\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         }
@@ -336,78 +312,62 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     } else if (command == "INFO" && parsed_command.size() == 2) {
         std::string section = parsed_command[1];
         
-        // Convert section to lowercase for case-insensitive comparison
         for (char& c : section) {
             c = std::tolower(c);
         }
         
         if (section == "replication") {
-            // Return role based on whether this server is a replica or master
             std::string info_content;
             if (is_replica) {
                 info_content = "role:slave";
             } else {
-                // Master role with replication ID and offset
                 info_content = "role:master\r\nmaster_replid:" + master_replid + "\r\nmaster_repl_offset:" + std::to_string(master_repl_offset);
             }
             std::string response = "$" + std::to_string(info_content.length()) + "\r\n" + info_content + "\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         } else {
-            // Only support replication section for now
             std::string response = "-ERR unsupported INFO section\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         }
     } else if (command == "REPLCONF" && parsed_command.size() >= 3) {
-        // Handle REPLCONF command from replicas
         std::string subcommand = parsed_command[1];
         
-        // Convert subcommand to lowercase for comparison
         for (char& c : subcommand) {
             c = std::tolower(c);
         }
         
         if (subcommand == "listening-port" && parsed_command.size() == 3) {
-            // Store the replica's listening port
             std::string port = parsed_command[2];
             replica_info[client_fd]["listening-port"] = port;
             std::cout << "Replica (fd: " << client_fd << ") listening on port: " << port << std::endl;
             
-            // Respond with OK
             std::string response = "+OK\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         } else if (subcommand == "capa" && parsed_command.size() == 3) {
-            // Store the replica's capabilities
             std::string capability = parsed_command[2];
             replica_info[client_fd]["capa"] = capability;
             std::cout << "Replica (fd: " << client_fd << ") capability: " << capability << std::endl;
             
-            // Respond with OK
             std::string response = "+OK\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         } else {
-            // Unsupported REPLCONF subcommand
             std::string response = "-ERR unsupported REPLCONF subcommand\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         }
     } else if (command == "PSYNC" && parsed_command.size() == 3) {
-        std::string repl_id = parsed_command[1];  // Should be "?" for initial sync
-        std::string offset = parsed_command[2];   // Should be "-1" for initial sync
+        std::string repl_id = parsed_command[1];
+        std::string offset = parsed_command[2];
         
         std::cout << "Received PSYNC from replica (fd: " << client_fd << ") with repl_id: " 
                   << repl_id << " and offset: " << offset << std::endl;
         
-        // For initial sync (repl_id = "?" and offset = "-1"), respond with FULLRESYNC
         if (repl_id == "?" && offset == "-1") {
-            // Send FULLRESYNC response with master's replication ID and offset
             std::string response = "+FULLRESYNC " + master_replid + " " + std::to_string(master_repl_offset) + "\r\n";
             std::cout << "Sending FULLRESYNC response: " << response;
             send(client_fd, response.c_str(), response.length(), 0);
             
-            // After FULLRESYNC, send an empty RDB file
-            // This is a hex representation of an empty RDB file
             std::string rdb_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
             
-            // Convert hex string to binary
             std::vector<uint8_t> rdb_data;
             for (size_t i = 0; i < rdb_hex.length(); i += 2) {
                 std::string hex_byte = rdb_hex.substr(i, 2);
@@ -415,16 +375,13 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 rdb_data.push_back(byte);
             }
             
-            // Send RDB file in format: $<length>\r\n<binary_contents>
             std::string rdb_header = "$" + std::to_string(rdb_data.size()) + "\r\n";
             std::cout << "Sending RDB file header: " << rdb_header;
             send(client_fd, rdb_header.c_str(), rdb_header.length(), 0);
             
-            // Send binary RDB data (no trailing \r\n)
             std::cout << "Sending RDB file data (" << rdb_data.size() << " bytes)" << std::endl;
             send(client_fd, rdb_data.data(), rdb_data.size(), 0);
         } else {
-            // For partial sync requests, we don't support them yet
             std::string response = "-ERR partial sync not supported\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         }
@@ -438,7 +395,6 @@ int main(int argc, char **argv) {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
-    // Parse command-line arguments
     for (int i = 1; i < argc; i += 2) {
         std::string arg = argv[i];
         if (i + 1 < argc) {
@@ -458,7 +414,6 @@ int main(int argc, char **argv) {
                     return 1;
                 }
             } else if (arg == "--replicaof") {
-                // Parse the master host and port from the argument
                 std::string replicaof_arg = argv[i + 1];
                 size_t space_pos = replicaof_arg.find(' ');
                 if (space_pos == std::string::npos) {
@@ -492,14 +447,11 @@ int main(int argc, char **argv) {
         std::cout << "Starting Redis master server on port " << server_port << std::endl;
     }
 
-    // Load RDB file at startup
     load_rdb_file();
 
-    // If this is a replica, connect to master and perform handshake
     if (is_replica) {
-        // Use a separate thread to avoid blocking the main server loop
         std::thread master_connection_thread(connect_to_master);
-        master_connection_thread.detach(); // Detach so it runs independently
+        master_connection_thread.detach();
     }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -517,7 +469,7 @@ int main(int argc, char **argv) {
     struct sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(server_port); // Use configurable port
+    server_addr.sin_port = htons(server_port);
 
     if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
         std::cerr << "Failed to bind to port " << server_port << "\n";
@@ -574,7 +526,6 @@ int main(int argc, char **argv) {
 
                 if (bytes_received <= 0) {
                     std::cout << "Client disconnected (fd: " << client_fd << ")\n";
-                    // Clean up replica info when client disconnects
                     replica_info.erase(client_fd);
                     close(client_fd);
                     it = client_fds.erase(it);
