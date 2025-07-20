@@ -127,12 +127,331 @@ void load_rdb_file() {
     }
 }
 
+void connect_to_master() {
+    if (!is_replica) {
+        return;
+    }
+    
+    std::cout << "Connecting to master at " << master_host << ":" << master_port << std::endl;
+    
+    int master_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (master_fd < 0) {
+        std::cerr << "Failed to create socket for master connection" << std::endl;
+        return;
+    }
+    
+    struct sockaddr_in master_addr;
+    memset(&master_addr, 0, sizeof(master_addr));
+    master_addr.sin_family = AF_INET;
+    master_addr.sin_port = htons(master_port);
+    
+    if (master_host == "localhost") {
+        master_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    } else if (inet_aton(master_host.c_str(), &master_addr.sin_addr) == 0) {
+        struct hostent *host_entry = gethostbyname(master_host.c_str());
+        if (host_entry == nullptr) {
+            std::cerr << "Failed to resolve master hostname: " << master_host << std::endl;
+            close(master_fd);
+            return;
+        }
+        memcpy(&master_addr.sin_addr, host_entry->h_addr_list[0], host_entry->h_length);
+    }
+    
+    if (connect(master_fd, (struct sockaddr*)&master_addr, sizeof(master_addr)) < 0) {
+        std::cerr << "Failed to connect to master at " << master_host << ":" << master_port << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Connected to master successfully" << std::endl;
+    
+    std::string ping_command = "*1\r\n$4\r\nPING\r\n";
+    if (send(master_fd, ping_command.c_str(), ping_command.length(), 0) < 0) {
+        std::cerr << "Failed to send PING to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent PING to master" << std::endl;
+    
+    char response_buffer[1024];
+    int bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive PONG from master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response from master: " << response_buffer << std::endl;
+    
+    std::string port_str = std::to_string(server_port);
+    std::string replconf_port_command = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + 
+                                       std::to_string(port_str.length()) + "\r\n" + port_str + "\r\n";
+    
+    if (send(master_fd, replconf_port_command.c_str(), replconf_port_command.length(), 0) < 0) {
+        std::cerr << "Failed to send REPLCONF listening-port to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent REPLCONF listening-port " << server_port << " to master" << std::endl;
+    
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive OK from master for REPLCONF listening-port" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response to REPLCONF listening-port: " << response_buffer << std::endl;
+    
+    std::string replconf_capa_command = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+    
+    if (send(master_fd, replconf_capa_command.c_str(), replconf_capa_command.length(), 0) < 0) {
+        std::cerr << "Failed to send REPLCONF capa psync2 to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent REPLCONF capa psync2 to master" << std::endl;
+    
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive OK from master for REPLCONF capa" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response to REPLCONF capa: " << response_buffer << std::endl;
+    
+    std::string psync_command = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+    
+    if (send(master_fd, psync_command.c_str(), psync_command.length(), 0) < 0) {
+        std::cerr << "Failed to send PSYNC to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent PSYNC ? -1 to master" << std::endl;
+    
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive FULLRESYNC from master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response to PSYNC: " << response_buffer << std::endl;
+    
+    std::cout << "Handshake completed successfully" << std::endl;
+    
+    close(master_fd);
+}
+
+void execute_redis_command(int client_fd, const std::vector<std::string>& parsed_command) {
+    if (parsed_command.empty()) {
+        return;
+    }
+
+    std::string command = parsed_command[0];
+
+    if (command == "PING") {
+        std::string response = "+PONG\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "ECHO" && parsed_command.size() == 2) {
+        std::string arg = parsed_command[1];
+        std::string response = "$" + std::to_string(arg.length()) + "\r\n" + arg + "\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
+        std::string key = parsed_command[1];
+        std::string value = parsed_command[2];
+
+        if (parsed_command.size() == 3) {
+            kv_store[key] = ValueEntry(value);
+        } else if (parsed_command.size() == 5) {
+            std::string px_arg = parsed_command[3];
+            for (char& c : px_arg) {
+                c = std::toupper(c);
+            }
+            if (px_arg == "PX") {
+                try {
+                    long expiry_ms = std::stol(parsed_command[4]);
+                    if (expiry_ms <= 0) {
+                        std::string response = "-ERR invalid expire time\r\n";
+                        send(client_fd, response.c_str(), response.length(), 0);
+                        return;
+                    }
+                    auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
+                    kv_store[key] = ValueEntry(value, expiry_time);
+                } catch (const std::exception& e) {
+                    std::string response = "-ERR invalid expire time\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                    return;
+                }
+            } else {
+                std::string response = "-ERR syntax error\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+        }
+        
+        std::string response = "+OK\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        
+        // Propagate SET command to replicas (only if this is from a regular client, not a replica)
+        if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+            propagate_to_replicas(parsed_command);
+        }
+        
+    } else if (command == "GET" && parsed_command.size() == 2) {
+        std::string key = parsed_command[1];
+        std::cout << "GET request for key: '" << key << "'" << std::endl;
+        
+        auto it = kv_store.find(key);
+        std::string response;
+        if (it != kv_store.end()) {
+            if (it->second.has_expiry && get_current_time() > it->second.expiry) {
+                std::cout << "Key '" << key << "' has expired, removing from store" << std::endl;
+                kv_store.erase(it);
+                response = "$-1\r\n";
+            } else {
+                std::string value = it->second.value;
+                std::cout << "Found key '" << key << "' with value: '" << value << "'" << std::endl;
+                response = "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
+            }
+        } else {
+            std::cout << "Key '" << key << "' not found in store" << std::endl;
+            response = "$-1\r\n";
+        }
+        std::cout << "Sending response: " << response << std::endl;
+        send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "KEYS" && parsed_command.size() == 2) {
+        std::string pattern = parsed_command[1];
+        
+        if (pattern == "*") {
+            auto current_time = get_current_time();
+            for (auto it = kv_store.begin(); it != kv_store.end();) {
+                if (it->second.has_expiry && current_time > it->second.expiry) {
+                    it = kv_store.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            
+            std::string response = "*" + std::to_string(kv_store.size()) + "\r\n";
+            for (const auto& pair : kv_store) {
+                const std::string& key = pair.first;
+                response += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
+            }
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else {
+            std::string response = "-ERR pattern not supported\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
+    } else if (command == "CONFIG" && parsed_command.size() == 3 && parsed_command[1] == "GET") {
+        std::string param = parsed_command[2];
+        std::string param_value;
+        if (param == "dir") {
+            param_value = config.dir;
+        } else if (param == "dbfilename") {
+            param_value = config.dbfilename;
+        } else {
+            std::string response = "-ERR unknown parameter\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+        std::string response = "*2\r\n$" + std::to_string(param.length()) + "\r\n" + param + "\r\n$" + 
+                              std::to_string(param_value.length()) + "\r\n" + param_value + "\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "INFO" && parsed_command.size() == 2) {
+        std::string section = parsed_command[1];
+        
+        for (char& c : section) {
+            c = std::tolower(c);
+        }
+        
+        if (section == "replication") {
+            std::string info_content;
+            if (is_replica) {
+                info_content = "role:slave";
+            } else {
+                info_content = "role:master\r\nmaster_replid:" + master_replid + "\r\nmaster_repl_offset:" + std::to_string(master_repl_offset);
+            }
+            std::string response = "$" + std::to_string(info_content.length()) + "\r\n" + info_content + "\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else {
+            std::string response = "-ERR unsupported INFO section\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
+    } else if (command == "REPLCONF" && parsed_command.size() >= 3) {
+        std::string subcommand = parsed_command[1];
+        
+        for (char& c : subcommand) {
+            c = std::tolower(c);
+        }
+        
+        if (subcommand == "listening-port" && parsed_command.size() == 3) {
+            std::string port = parsed_command[2];
+            replica_info[client_fd]["listening-port"] = port;
+            std::cout << "Replica (fd: " << client_fd << ") listening on port: " << port << std::endl;
+            
+            std::string response = "+OK\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else if (subcommand == "capa" && parsed_command.size() == 3) {
+            std::string capability = parsed_command[2];
+            replica_info[client_fd]["capa"] = capability;
+            std::cout << "Replica (fd: " << client_fd << ") capability: " << capability << std::endl;
+            
+            std::string response = "+OK\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else {
+            std::string response = "-ERR unsupported REPLCONF subcommand\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
+    } else if (command == "PSYNC" && parsed_command.size() == 3) {
+        std::string repl_id = parsed_command[1];
+        std::string offset = parsed_command[2];
+        
+        std::cout << "Received PSYNC from replica (fd: " << client_fd << ") with repl_id: " 
+                  << repl_id << " and offset: " << offset << std::endl;
+        
+        if (repl_id == "?" && offset == "-1") {
+            std::string response = "+FULLRESYNC " + master_replid + " " + std::to_string(master_repl_offset) + "\r\n";
+            std::cout << "Sending FULLRESYNC response: " << response;
+            send(client_fd, response.c_str(), response.length(), 0);
+            
+            std::string rdb_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
+            
+            std::vector<uint8_t> rdb_data;
+            for (size_t i = 0; i < rdb_hex.length(); i += 2) {
+                std::string hex_byte = rdb_hex.substr(i, 2);
+                uint8_t byte = static_cast<uint8_t>(std::stoul(hex_byte, nullptr, 16));
+                rdb_data.push_back(byte);
+            }
+            
+            std::string rdb_header = "$" + std::to_string(rdb_data.size()) + "\r\n";
+            std::cout << "Sending RDB file header: " << rdb_header;
+            send(client_fd, rdb_header.c_str(), rdb_header.length(), 0);
+            
+            std::cout << "Sending RDB file data (" << rdb_data.size() << " bytes)" << std::endl;
+            send(client_fd, rdb_data.data(), rdb_data.size(), 0);
+            
+            connected_replicas.insert(client_fd);
+            std::cout << "Replica (fd: " << client_fd << ") handshake completed. Now tracking for command propagation." << std::endl;
+            
+        } else {
+            std::string response = "-ERR partial sync not supported\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
+    } else {
+        std::string response = "-ERR unknown command or wrong number of arguments\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    }
+}
+
 std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
-    // Store the offset before updating it
     int offset_to_report = replica_offset;
     
-    // Only increment offset for actual commands that modify the replica state
-    // Don't increment for REPLCONF GETACK since it's just a query
     bool should_increment_offset = true;
     
     if (!parsed_command.empty()) {
