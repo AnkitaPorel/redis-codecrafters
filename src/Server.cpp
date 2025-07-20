@@ -414,6 +414,18 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             
             std::string response = "+OK\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
+        } else if (subcommand == "ack" && parsed_command.size() == 4) {
+            try {
+                int offset = std::stoi(parsed_command[3]);
+                std::lock_guard<std::mutex> lock(offset_mutex);
+                replica_offsets[client_fd] = offset;
+                std::cout << "Replica (fd: " << client_fd << ") acknowledged offset: " << offset << std::endl;
+                std::string response = "+OK\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+            } catch (const std::exception& e) {
+                std::string response = "-ERR invalid offset\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+            }
         } else {
             std::string response = "-ERR unsupported REPLCONF subcommand\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
@@ -455,20 +467,103 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     } else if (command == "WAIT" && parsed_command.size() == 3) {
         try {
-        int numreplicas = std::stoi(parsed_command[1]);
-        int timeout_ms = std::stoi(parsed_command[2]);
-        
-        auto start_time = std::chrono::steady_clock::now();
-        auto timeout = std::chrono::milliseconds(timeout_ms);
-        
-        int current_master_offset;
-        {
-            std::lock_guard<std::mutex> lock(offset_mutex);
-            current_master_offset = master_offset;
-        }
-        
-        int acked_replicas = 0;
-        while (true) {
+            int numreplicas = std::stoi(parsed_command[1]);
+            int timeout_ms = std::stoi(parsed_command[2]);
+            
+            auto start_time = std::chrono::steady_clock::now();
+            auto timeout = std::chrono::milliseconds(timeout_ms);
+            
+            int current_master_offset;
+            {
+                std::lock_guard<std::mutex> lock(offset_mutex);
+                current_master_offset = master_offset;
+            }
+            
+            // Send REPLCONF GETACK * to all replicas once
+            std::string getack_command = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
+            for (int replica_fd : connected_replicas) {
+                ssize_t bytes_sent = send(replica_fd, getack_command.c_str(), getack_command.length(), MSG_NOSIGNAL);
+                if (bytes_sent < 0) {
+                    std::cerr << "Failed to send REPLCONF GETACK to replica (fd: " << replica_fd << ")" << std::endl;
+                } else {
+                    std::cout << "Sent REPLCONF GETACK to replica (fd: " << replica_fd << ")" << std::endl;
+                }
+            }
+            
+            // Wait for ACKs or timeout
+            int acked_replicas = 0;
+            while (std::chrono::steady_clock::now() - start_time < timeout) {
+                {
+                    std::lock_guard<std::mutex> lock(offset_mutex);
+                    acked_replicas = 0;
+                    for (const auto& replica_fd : connected_replicas) {
+                        auto it = replica_offsets.find(replica_fd);
+                        if (it != replica_offsets.end() && it->second >= current_master_offset) {
+                            acked_replicas++;
+                        }
+                    }
+                    if (acked_replicas >= numreplicas) {
+                        break;
+                    }
+                }
+                
+                // Use select to check for incoming data without blocking indefinitely
+                fd_set read_fds;
+                FD_ZERO(&read_fds);
+                int max_fd = 0;
+                for (int fd : connected_replicas) {
+                    FD_SET(fd, &read_fds);
+                    if (fd > max_fd) max_fd = fd;
+                }
+                
+                struct timeval tv;
+                tv.tv_sec = 0;
+                tv.tv_usec = 10000; // 10ms
+                int select_result = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
+                
+                if (select_result > 0) {
+                    for (auto it = connected_replicas.begin(); it != connected_replicas.end();) {
+                        int replica_fd = *it;
+                        if (FD_ISSET(replica_fd, &read_fds)) {
+                            char buffer[4096];
+                            int bytes_received = recv(replica_fd, buffer, sizeof(buffer) - 1, 0);
+                            if (bytes_received <= 0) {
+                                std::cout << "Replica disconnected (fd: " << replica_fd << ")" << std::endl;
+                                replica_info.erase(replica_fd);
+                                replica_offsets.erase(replica_fd);
+                                it = connected_replicas.erase(it);
+                                continue;
+                            }
+                            buffer[bytes_received] = '\0';
+                            std::cout << "Received from replica (fd: " << replica_fd << "): " << buffer << std::endl;
+                            
+                            std::vector<std::string> replica_command;
+                            try {
+                                parse_redis_command(buffer, replica_command);
+                                if (!replica_command.empty() && replica_command[0] == "REPLCONF" &&
+                                    replica_command.size() == 4 && replica_command[1] == "ACK") {
+                                    try {
+                                        int offset = std::stoi(replica_command[3]);
+                                        std::lock_guard<std::mutex> lock(offset_mutex);
+                                        replica_offsets[replica_fd] = offset;
+                                        std::cout << "Replica (fd: " << replica_fd << ") acknowledged offset: " << offset << std::endl;
+                                        std::string response = "+OK\r\n";
+                                        send(replica_fd, response.c_str(), response.length(), MSG_NOSIGNAL);
+                                    } catch (const std::exception& e) {
+                                        std::string response = "-ERR invalid offset\r\n";
+                                        send(replica_fd, response.c_str(), response.length(), MSG_NOSIGNAL);
+                                    }
+                                }
+                            } catch (const std::exception& e) {
+                                std::cerr << "Error parsing replica command: " << e.what() << std::endl;
+                            }
+                        }
+                        ++it;
+                    }
+                }
+            }
+            
+            // Final check for acknowledged replicas
             {
                 std::lock_guard<std::mutex> lock(offset_mutex);
                 acked_replicas = 0;
@@ -478,33 +573,15 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                         acked_replicas++;
                     }
                 }
-                if (acked_replicas >= numreplicas) {
-                    break;
-                }
             }
             
-            auto elapsed = std::chrono::steady_clock::now() - start_time;
-            if (elapsed >= timeout) {
-                break;
-            }
-            
-            // Send GETACK to all replicas to request their current offset
-            std::string getack_command = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
-            for (int replica_fd : connected_replicas) {
-                send(replica_fd, getack_command.c_str(), getack_command.length(), MSG_NOSIGNAL);
-            }
-            
-            // Sleep briefly to avoid busy-waiting
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::string response = ":" + std::to_string(acked_replicas) + "\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            std::cout << "WAIT command: Returning " << acked_replicas << " acknowledged replicas for offset " << current_master_offset << std::endl;
+        } catch (const std::exception& e) {
+            std::string response = "-ERR invalid arguments for WAIT\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
         }
-        
-        std::string response = ":" + std::to_string(acked_replicas) + "\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        std::cout << "WAIT command: Returning " << acked_replicas << " acknowledged replicas" << std::endl;
-    } catch (const std::exception& e) {
-        std::string response = "-ERR invalid arguments for WAIT\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-    }
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
