@@ -452,6 +452,48 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 }
 
+// Add this new function to execute commands on replica without sending responses
+void execute_replica_command(const std::vector<std::string>& parsed_command) {
+    if (parsed_command.empty()) {
+        return;
+    }
+
+    std::string command = parsed_command[0];
+
+    if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
+        std::string key = parsed_command[1];
+        std::string value = parsed_command[2];
+
+        if (parsed_command.size() == 3) {
+            kv_store[key] = ValueEntry(value);
+            std::cout << "Replica: SET '" << key << "' = '" << value << "'" << std::endl;
+        } else if (parsed_command.size() == 5) {
+            std::string px_arg = parsed_command[3];
+            for (char& c : px_arg) {
+                c = std::toupper(c);
+            }
+            if (px_arg == "PX") {
+                try {
+                    long expiry_ms = std::stol(parsed_command[4]);
+                    if (expiry_ms > 0) {
+                        auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
+                        kv_store[key] = ValueEntry(value, expiry_time);
+                        std::cout << "Replica: SET '" << key << "' = '" << value << "' with expiry " << expiry_ms << "ms" << std::endl;
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "Replica: Invalid expiry time in SET command" << std::endl;
+                }
+            }
+        }
+    } else if (command == "DEL" && parsed_command.size() >= 2) {
+        for (size_t i = 1; i < parsed_command.size(); i++) {
+            std::string key = parsed_command[i];
+            kv_store.erase(key);
+            std::cout << "Replica: DEL '" << key << "'" << std::endl;
+        }
+    }
+}
+
 void handle_master_connection() {
     if (!is_replica) {
         return;
@@ -490,7 +532,6 @@ void handle_master_connection() {
     
     std::cout << "Connected to master successfully" << std::endl;
     
-    // Perform handshake
     std::string ping_command = "*1\r\n$4\r\nPING\r\n";
     if (send(master_fd, ping_command.c_str(), ping_command.length(), 0) < 0) {
         std::cerr << "Failed to send PING to master" << std::endl;
@@ -560,7 +601,6 @@ void handle_master_connection() {
     
     std::cout << "Sent PSYNC ? -1 to master" << std::endl;
     
-    // Read FULLRESYNC response
     bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
     if (bytes_received <= 0) {
         std::cerr << "Failed to receive FULLRESYNC from master" << std::endl;
@@ -570,8 +610,6 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to PSYNC: " << response_buffer << std::endl;
     
-    // Read and discard the RDB file
-    // The RDB file starts with $<size>\r\n followed by the actual data
     std::string rdb_buffer;
     std::string current_data(response_buffer, bytes_received);
     
@@ -673,49 +711,6 @@ void handle_master_connection() {
     }
     
     close(master_fd);
-}
-
-// Add this new function to execute commands on replica without sending responses
-void execute_replica_command(const std::vector<std::string>& parsed_command) {
-    if (parsed_command.empty()) {
-        return;
-    }
-
-    std::string command = parsed_command[0];
-
-    if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
-        std::string key = parsed_command[1];
-        std::string value = parsed_command[2];
-
-        if (parsed_command.size() == 3) {
-            kv_store[key] = ValueEntry(value);
-            std::cout << "Replica: SET '" << key << "' = '" << value << "'" << std::endl;
-        } else if (parsed_command.size() == 5) {
-            std::string px_arg = parsed_command[3];
-            for (char& c : px_arg) {
-                c = std::toupper(c);
-            }
-            if (px_arg == "PX") {
-                try {
-                    long expiry_ms = std::stol(parsed_command[4]);
-                    if (expiry_ms > 0) {
-                        auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
-                        kv_store[key] = ValueEntry(value, expiry_time);
-                        std::cout << "Replica: SET '" << key << "' = '" << value << "' with expiry " << expiry_ms << "ms" << std::endl;
-                    }
-                } catch (const std::exception& e) {
-                    std::cerr << "Replica: Invalid expiry time in SET command" << std::endl;
-                }
-            }
-        }
-    } else if (command == "DEL" && parsed_command.size() >= 2) {
-        for (size_t i = 1; i < parsed_command.size(); i++) {
-            std::string key = parsed_command[i];
-            kv_store.erase(key);
-            std::cout << "Replica: DEL '" << key << "'" << std::endl;
-        }
-    }
-    // Add other write commands as needed (INCR, DECR, etc.)
 }
 
 int main(int argc, char **argv) {
