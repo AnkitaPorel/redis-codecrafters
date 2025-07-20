@@ -464,26 +464,24 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "+OK\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else if (subcommand == "ack" && parsed_command.size() == 3) {
-        // Handle ACK from replica
         try {
-            int ack_offset = std::stoi(parsed_command[2]);
-            std::cout << "Received ACK from replica (fd: " << client_fd << ") with offset: " << ack_offset << std::endl;
+        int ack_offset = std::stoi(parsed_command[2]);
+        std::cout << "Received ACK from replica (fd: " << client_fd << ") with offset: " << ack_offset << std::endl;
+        
+        {
+            std::lock_guard<std::mutex> wait_lock(wait_mutex);
+            replica_ack_offsets[client_fd] = ack_offset;
             
-            {
-                std::lock_guard<std::mutex> wait_lock(wait_mutex);
-                replica_ack_offsets[client_fd] = ack_offset;
-                
-                // Check if this replica has processed all pending commands
-                int current_master_offset = master_offset;
-                if (ack_offset >= pending_wait_offset && pending_wait_offset > 0) {
-                    acked_replicas++;
-                    std::cout << "Replica " << client_fd << " acknowledged. Total acked: " << acked_replicas.load() << std::endl;
-                }
+            // Check if this replica has processed all pending commands
+            if (ack_offset >= pending_wait_offset && pending_wait_offset > 0) {
+                acked_replicas++;
+                std::cout << "Replica " << client_fd << " acknowledged. Total acked: " << acked_replicas.load() << std::endl;
+                wait_cv.notify_all();
             }
-            wait_cv.notify_all();
-        } catch (const std::exception& e) {
-            std::cerr << "Invalid ACK offset: " << parsed_command[2] << std::endl;
         }
+    } catch (const std::exception& e) {
+        std::cerr << "Invalid ACK offset: " << parsed_command[2] << std::endl;
+    }
     } else {
         std::string response = "-ERR unsupported REPLCONF subcommand\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -573,20 +571,30 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send_getack_to_replicas();
         
         // Wait for acknowledgments or timeout
-        std::unique_lock<std::mutex> wait_lock(wait_mutex);
-        auto wait_result = wait_cv.wait_for(wait_lock, std::chrono::milliseconds(timeout_ms), [&]() {
-            int current_acked = acked_replicas.load();
-            std::cout << "Wait condition check: acked=" << current_acked 
-                      << ", expected=" << num_replicas_expected << std::endl;
-            return current_acked >= num_replicas_expected;
-        });
+        auto start_time = std::chrono::steady_clock::now();
+        auto timeout_time = start_time + std::chrono::milliseconds(timeout_ms);
         
-        int final_acked = acked_replicas.load();
+        int final_acked = 0;
+        bool timed_out = false;
         
-        if (wait_result) {
-            std::cout << "WAIT completed: " << final_acked << " replicas acknowledged within timeout" << std::endl;
-        } else {
+        while (true) {
+            std::unique_lock<std::mutex> wait_lock(wait_mutex);
+            final_acked = acked_replicas.load();
+            
+            if (final_acked >= num_replicas_expected) {
+                break;
+            }
+            
+            if (wait_cv.wait_until(wait_lock, timeout_time) == std::cv_status::timeout) {
+                timed_out = true;
+                break;
+            }
+        }
+        
+        if (timed_out) {
             std::cout << "WAIT timed out: " << final_acked << " replicas acknowledged" << std::endl;
+        } else {
+            std::cout << "WAIT completed: " << final_acked << " replicas acknowledged within timeout" << std::endl;
         }
         
         std::string response = ":" + std::to_string(final_acked) + "\r\n";
