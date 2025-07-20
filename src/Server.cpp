@@ -450,13 +450,13 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 }
 
 std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
-    int offset_to_report = replica_offset;
+    replica_offset += bytes_processed;
+    std::cout << "Replica: Updated offset to " << replica_offset << " after processing " << bytes_processed << " bytes" << std::endl;
 
-    bool should_increment_offset = true;
-    
     if (!parsed_command.empty()) {
         std::string command = parsed_command[0];
         
+        // Convert command to uppercase for comparison
         for (char& c : command) {
             c = std::toupper(c);
         }
@@ -469,11 +469,9 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
             }
             
             if (subcommand == "GETACK") {
-                std::cout << "Replica: Responding to GETACK with ACK " << offset_to_report << std::endl;
+                std::cout << "Replica: Responding to GETACK with ACK " << replica_offset << std::endl;
                 
-                should_increment_offset = false;
-                
-                std::string offset_str = std::to_string(offset_to_report);
+                std::string offset_str = std::to_string(replica_offset);
                 std::string ack_response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
                                            std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
                 return ack_response;
