@@ -451,6 +451,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
 std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
     replica_offset += bytes_processed;
+
+    bool should_increment_offset = true;
+    
     std::cout << "Replica: Updated offset to " << replica_offset << " after processing " << bytes_processed << " bytes" << std::endl;
 
     if (!parsed_command.empty()) {
