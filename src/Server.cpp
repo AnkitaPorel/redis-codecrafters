@@ -205,20 +205,82 @@ void load_rdb_file() {
     }
 }
 
-bool is_valid_stream_id(const std::string& id) {
-    size_t dash_pos = id.find('-');
-    if (dash_pos == std::string::npos || dash_pos == 0 || dash_pos == id.length() - 1) {
-        return false;
+long long generate_sequence_number(long long ms, const StreamData& stream) {
+    // Default sequence number is 0, except when ms is 0 (then it's 1)
+    long long default_seq = (ms == 0) ? 1 : 0;
+    
+    if (stream.entries.empty()) {
+        return default_seq;
     }
     
-    // Check both parts are numeric
-    for (size_t i = 0; i < id.length(); i++) {
-        if (i != dash_pos && !isdigit(id[i])) {
-            return false;
+    // Find the last entry with the same timestamp
+    for (auto it = stream.entries.rbegin(); it != stream.entries.rend(); ++it) {
+        long long entry_ms, entry_seq;
+        if (parse_stream_id(it->id, entry_ms, entry_seq)) {
+            if (entry_ms == ms) {
+                return entry_seq + 1;
+            } else if (entry_ms < ms) {
+                break;
+            }
         }
     }
     
-    return true;
+    return default_seq;
+}
+
+// Helper function to validate and potentially generate a new ID
+std::pair<bool, std::string> validate_or_generate_id(const std::string& id_spec, StreamData& stream) {
+    size_t dash_pos = id_spec.find('-');
+    if (dash_pos == std::string::npos || dash_pos == 0 || dash_pos == id_spec.length() - 1) {
+        return {false, ""};
+    }
+    
+    std::string ms_part = id_spec.substr(0, dash_pos);
+    std::string seq_part = id_spec.substr(dash_pos + 1);
+    
+    // Parse milliseconds part
+    long long ms;
+    try {
+        ms = std::stoll(ms_part);
+    } catch (const std::exception& e) {
+        return {false, ""};
+    }
+    
+    // Handle auto-sequence case
+    if (seq_part == "*") {
+        long long seq = generate_sequence_number(ms, stream);
+        return {true, ms_part + "-" + std::to_string(seq)};
+    }
+    
+    // Handle explicit sequence number case
+    try {
+        long long seq = std::stoll(seq_part);
+        if (ms < 0 || seq <= 0) {
+            return {false, ""};
+        }
+        
+        // For empty stream, just check it's greater than 0-0
+        if (stream.entries.empty()) {
+            if (ms > 0 || (ms == 0 && seq > 0)) {
+                return {true, id_spec};
+            }
+            return {false, ""};
+        }
+        
+        // Compare with last entry
+        const std::string& last_id = stream.entries.back().id;
+        long long last_ms, last_seq;
+        if (!parse_stream_id(last_id, last_ms, last_seq)) {
+            return {false, ""};
+        }
+        
+        if (ms > last_ms || (ms == last_ms && seq > last_seq)) {
+            return {true, id_spec};
+        }
+        return {false, ""};
+    } catch (const std::exception& e) {
+        return {false, ""};
+    }
 }
 
 bool parse_stream_id(const std::string& id, long long& ms, long long& seq) {
@@ -232,38 +294,6 @@ bool parse_stream_id(const std::string& id, long long& ms, long long& seq) {
         seq = std::stoll(id.substr(dash_pos + 1));
     } catch (const std::exception& e) {
         return false;
-    }
-    
-    return true;
-}
-
-bool is_valid_new_id(const std::string& new_id, const StreamData& stream) {
-    long long new_ms, new_seq;
-    if (!parse_stream_id(new_id, new_ms, new_seq)) {
-        return false;
-    }
-    
-    // Minimum ID check
-    if (new_ms < 0 || new_seq <= 0) {
-        return false;
-    }
-    
-    // For empty stream, just check it's greater than 0-0
-    if (stream.entries.empty()) {
-        return (new_ms > 0 || (new_ms == 0 && new_seq > 0));
-    }
-    
-    // Compare with last entry
-    const std::string& last_id = stream.entries.back().id;
-    long long last_ms, last_seq;
-    if (!parse_stream_id(last_id, last_ms, last_seq)) {
-        return false; // Shouldn't happen if existing entries are valid
-    }
-    
-    if (new_ms < last_ms) {
-        return false;
-    } else if (new_ms == last_ms) {
-        return new_seq > last_seq;
     }
     
     return true;
@@ -754,23 +784,8 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 
     std::string stream_key = parsed_command[1];
-    std::string entry_id = parsed_command[2];
+    std::string id_spec = parsed_command[2];
     
-    // Check if ID is valid format
-    if (!is_valid_stream_id(entry_id)) {
-        std::string response = "-ERR Invalid stream ID specified\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        return;
-    }
-    
-    // Check if ID is greater than 0-0
-    long long ms, seq;
-    if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq <= 0) {
-        std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        return;
-    }
-
     // Create stream if it doesn't exist
     if (stream_store.find(stream_key) == stream_store.end()) {
         stream_store[stream_key] = StreamData();
@@ -778,10 +793,16 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     StreamData& stream = stream_store[stream_key];
     
-    // Validate the new ID against the last entry
-    if (!is_valid_new_id(entry_id, stream)) {
-        std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
+    // Validate or generate the ID
+    auto [valid, entry_id] = validate_or_generate_id(id_spec, stream);
+    if (!valid) {
+        if (id_spec.find('*') != std::string::npos) {
+            std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else {
+            std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
         return;
     }
 
@@ -803,7 +824,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     if (connected_replicas.find(client_fd) == connected_replicas.end()) {
         propagate_to_replicas(parsed_command);
     }
-} else if (command == "TYPE" && parsed_command.size() == 2) {
+    } else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
     
