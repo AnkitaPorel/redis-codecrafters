@@ -707,70 +707,69 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send(client_fd, response.c_str(), response.length(), 0);
     }
     } else if (command == "XADD" && parsed_command.size() >= 4 && (parsed_command.size() % 2 == 0)) {
-        std::string stream_key = parsed_command[1];
-        std::string entry_id = parsed_command[2];
-        
-        if (!is_valid_stream_id(entry_id)) {
-            std::string response = "-ERR Invalid stream ID specified as stream command argument\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
-        }
-        
-        if ((parsed_command.size() - 3) % 2 != 0) {
-            std::string response = "-ERR wrong number of arguments for XADD\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
-        }
-        
-        if (stream_store.find(stream_key) == stream_store.end()) {
-            stream_store[stream_key] = StreamData();
-        }
-        
-        StreamEntry new_entry(entry_id);
-        
-        for (size_t i = 3; i < parsed_command.size(); i += 2) {
-            std::string field = parsed_command[i];
-            std::string value = parsed_command[i + 1];
-            new_entry.fields[field] = value;
-        }
-        
-        stream_store[stream_key].entries.push_back(new_entry);
-        
-        std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
+    std::string stream_key = parsed_command[1];
+    std::string entry_id = parsed_command[2];
+    
+    if (!is_valid_stream_id(entry_id)) {
+        std::string response = "-ERR Invalid stream ID specified as stream command argument\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
-        
-        if (connected_replicas.find(client_fd) == connected_replicas.end()) {
-            propagate_to_replicas(parsed_command);
-        }
-        
+        return;
+    }
+    
+    if ((parsed_command.size() - 3) % 2 != 0) {
+        std::string response = "-ERR wrong number of arguments for XADD\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+    
+    if (stream_store.find(stream_key) == stream_store.end()) {
+        stream_store[stream_key] = StreamData();
+    }
+    
+    StreamEntry new_entry(entry_id);
+    
+    for (size_t i = 3; i < parsed_command.size(); i += 2) {
+        std::string field = parsed_command[i];
+        std::string value = parsed_command[i + 1];
+        new_entry.fields[field] = value;
+    }
+    
+    stream_store[stream_key].entries.push_back(new_entry);
+    
+    std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
+    send(client_fd, response.c_str(), response.length(), 0);
+    
+    if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+        propagate_to_replicas(parsed_command);
+    }
     } else if (command == "TYPE" && parsed_command.size() == 2) {
-        std::string key = parsed_command[1];
-        std::string response;
-        
-        auto stream_it = stream_store.find(key);
-        if (stream_it != stream_store.end()) {
-            if (stream_it->second.has_expiry && get_current_time() > stream_it->second.expiry) {
-                stream_store.erase(stream_it);
+    std::string key = parsed_command[1];
+    std::string response;
+    
+    auto stream_it = stream_store.find(key);
+    if (stream_it != stream_store.end()) {
+        if (stream_it->second.has_expiry && get_current_time() > stream_it->second.expiry) {
+            stream_store.erase(stream_it);
+            response = "+none\r\n";
+        } else {
+            response = "+stream\r\n";
+        }
+    } else {
+        auto kv_it = kv_store.find(key);
+        if (kv_it != kv_store.end()) {
+            if (kv_it->second.has_expiry && get_current_time() > kv_it->second.expiry) {
+                kv_store.erase(kv_it);
                 response = "+none\r\n";
             } else {
-                response = "+stream\r\n";
+                response = "+string\r\n";
             }
         } else {
-            auto kv_it = kv_store.find(key);
-            if (kv_it != kv_store.end()) {
-                if (kv_it->second.has_expiry && get_current_time() > kv_it->second.expiry) {
-                    kv_store.erase(kv_it);
-                    response = "+none\r\n";
-                } else {
-                    response = "+string\r\n";
-                }
-            } else {
-                response = "+none\r\n";
-            }
+            response = "+none\r\n";
         }
-        
-        send(client_fd, response.c_str(), response.length(), 0);
-} else {
+    }
+    
+    send(client_fd, response.c_str(), response.length(), 0);
+    } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
