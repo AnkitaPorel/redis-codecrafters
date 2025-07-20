@@ -101,7 +101,7 @@ std::string command_to_resp_array(const std::vector<std::string>& command) {
 
 bool parse_stream_id(const std::string& id, long long& ms, long long& seq) {
     size_t dash_pos = id.find('-');
-    if (dash_pos == std::string::npos) {
+    if (dash_pos == std::string::npos || dash_pos == 0 || dash_pos == id.length() - 1) {
         return false;
     }
     
@@ -222,29 +222,30 @@ void load_rdb_file() {
 }
 
 long long generate_sequence_number(long long ms, const StreamData& stream) {
-    // Default sequence number is 0, except when ms is 0 (then it's 1)
-    long long default_seq = (ms == 0) ? 1 : 0;
-    
-    if (stream.entries.empty()) {
-        return default_seq;
+    if (ms == 0) {
+        if (stream.entries.empty()) {
+            return 1;
+        }
+    } else {
+        if (stream.entries.empty()) {
+            return 0;
+        }
     }
+
+    long long max_seq = (ms == 0) ? 0 : -1;
     
-    // Find the last entry with the same timestamp
-    for (auto it = stream.entries.rbegin(); it != stream.entries.rend(); ++it) {
+    for (const auto& entry : stream.entries) {
         long long entry_ms, entry_seq;
-        if (parse_stream_id(it->id, entry_ms, entry_seq)) {
-            if (entry_ms == ms) {
-                return entry_seq + 1;
-            } else if (entry_ms < ms) {
-                break;
+        if (parse_stream_id(entry.id, entry_ms, entry_seq)) {
+            if (entry_ms == ms && entry_seq > max_seq) {
+                max_seq = entry_seq;
             }
         }
     }
     
-    return default_seq;
+    return max_seq + 1;
 }
 
-// Helper function to validate and potentially generate a new ID
 std::pair<bool, std::string> validate_or_generate_id(const std::string& id_spec, StreamData& stream) {
     size_t dash_pos = id_spec.find('-');
     if (dash_pos == std::string::npos || dash_pos == 0 || dash_pos == id_spec.length() - 1) {
@@ -254,7 +255,6 @@ std::pair<bool, std::string> validate_or_generate_id(const std::string& id_spec,
     std::string ms_part = id_spec.substr(0, dash_pos);
     std::string seq_part = id_spec.substr(dash_pos + 1);
     
-    // Parse milliseconds part
     long long ms;
     try {
         ms = std::stoll(ms_part);
@@ -262,20 +262,17 @@ std::pair<bool, std::string> validate_or_generate_id(const std::string& id_spec,
         return {false, ""};
     }
     
-    // Handle auto-sequence case
     if (seq_part == "*") {
         long long seq = generate_sequence_number(ms, stream);
         return {true, ms_part + "-" + std::to_string(seq)};
     }
     
-    // Handle explicit sequence number case
     try {
         long long seq = std::stoll(seq_part);
         if (ms < 0 || seq <= 0) {
             return {false, ""};
         }
         
-        // For empty stream, just check it's greater than 0-0
         if (stream.entries.empty()) {
             if (ms > 0 || (ms == 0 && seq > 0)) {
                 return {true, id_spec};
@@ -283,7 +280,6 @@ std::pair<bool, std::string> validate_or_generate_id(const std::string& id_spec,
             return {false, ""};
         }
         
-        // Compare with last entry
         const std::string& last_id = stream.entries.back().id;
         long long last_ms, last_seq;
         if (!parse_stream_id(last_id, last_ms, last_seq)) {
@@ -773,9 +769,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send(client_fd, response.c_str(), response.length(), 0);
     }
     } else if (command == "XADD") {
-    // Debug output
-    std::cout << "Processing XADD command with " << parsed_command.size() << " arguments" << std::endl;
-    
     // Minimum command: XADD key ID field value (5 args)
     if (parsed_command.size() < 5 || (parsed_command.size() - 3) % 2 != 0) {
         std::string response = "-ERR wrong number of arguments for XADD\r\n";
@@ -792,37 +785,100 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 
     StreamData& stream = stream_store[stream_key];
-    
-    // Validate or generate the ID
-    auto [valid, entry_id] = validate_or_generate_id(id_spec, stream);
-    if (!valid) {
-        if (id_spec.find('*') != std::string::npos) {
+    std::string entry_id;
+    bool valid_id = false;
+
+    // Check if we need to auto-generate sequence number
+    size_t dash_pos = id_spec.find('-');
+    if (dash_pos != std::string::npos && dash_pos + 1 < id_spec.length() && 
+        id_spec.substr(dash_pos + 1) == "*") {
+        // Auto-generate sequence number case
+        std::string ms_part = id_spec.substr(0, dash_pos);
+        try {
+            long long ms = std::stoll(ms_part);
+            if (ms < 0) {
+                std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+
+            // Generate sequence number
+            long long seq = 0;
+            if (!stream.entries.empty()) {
+                // Find the highest sequence number for this timestamp
+                long long max_seq = -1;
+                for (const auto& entry : stream.entries) {
+                    long long entry_ms, entry_seq;
+                    if (parse_stream_id(entry.id, entry_ms, entry_seq) && entry_ms == ms) {
+                        if (entry_seq > max_seq) {
+                            max_seq = entry_seq;
+                        }
+                    }
+                }
+                seq = max_seq + 1;
+            } else {
+                // Special case: if timestamp is 0, start sequence at 1
+                seq = (ms == 0) ? 1 : 0;
+            }
+
+            entry_id = ms_part + "-" + std::to_string(seq);
+            valid_id = true;
+        } catch (const std::exception& e) {
+            std::string response = "-ERR Invalid stream ID specified\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+    } else {
+        // Explicit ID case
+        long long ms, seq;
+        if (!parse_stream_id(id_spec, ms, seq)) {
+            std::string response = "-ERR Invalid stream ID specified\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+
+        // Validate the ID
+        if (ms < 0 || seq <= 0) {
             std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
-        } else {
-            std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
+            return;
         }
-        return;
+
+        if (!stream.entries.empty()) {
+            const std::string& last_id = stream.entries.back().id;
+            long long last_ms, last_seq;
+            if (parse_stream_id(last_id, last_ms, last_seq)) {
+                if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
+                    std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                    return;
+                }
+            }
+        }
+
+        entry_id = id_spec;
+        valid_id = true;
     }
 
-    // Create new entry
-    StreamEntry new_entry(entry_id);
-    for (size_t i = 3; i < parsed_command.size(); i += 2) {
-        if (i + 1 >= parsed_command.size()) break;
-        new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
-    }
+    if (valid_id) {
+        // Create new entry
+        StreamEntry new_entry(entry_id);
+        for (size_t i = 3; i < parsed_command.size(); i += 2) {
+            if (i + 1 >= parsed_command.size()) break;
+            new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
+        }
 
-    // Add entry to stream
-    stream.entries.push_back(new_entry);
+        // Add entry to stream
+        stream.entries.push_back(new_entry);
 
-    // Return the entry ID as a bulk string
-    std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
-    send(client_fd, response.c_str(), response.length(), 0);
+        // Return the entry ID
+        std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
 
-    // Propagate to replicas if this isn't from a replica
-    if (connected_replicas.find(client_fd) == connected_replicas.end()) {
-        propagate_to_replicas(parsed_command);
+        // Propagate to replicas if this isn't from a replica
+        if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+            propagate_to_replicas(parsed_command);
+        }
     }
     } else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
