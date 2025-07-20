@@ -893,21 +893,17 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 
     if (valid_id) {
-        // Create new entry
         StreamEntry new_entry(entry_id);
         for (size_t i = 3; i < parsed_command.size(); i += 2) {
             if (i + 1 >= parsed_command.size()) break;
             new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
         }
 
-        // Add entry to stream
         stream.entries.push_back(new_entry);
 
-        // Return the entry ID
         std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
 
-        // Propagate to replicas if this isn't from a replica
         if (connected_replicas.find(client_fd) == connected_replicas.end()) {
             propagate_to_replicas(parsed_command);
         }
@@ -917,16 +913,14 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::string start_id = parsed_command[2];
     std::string end_id = parsed_command[3];
     
-    // Check if stream exists
     if (stream_store.find(stream_key) == stream_store.end()) {
-        send(client_fd, "*0\r\n", 4, 0); // Empty array
+        send(client_fd, "*0\r\n", 4, 0);
         return;
     }
 
     const StreamData& stream = stream_store[stream_key];
     std::vector<const StreamEntry*> matched_entries;
 
-    // Parse start and end IDs (handle missing sequence numbers)
     long long start_ms = 0, start_seq = 0;
     size_t dash_pos = start_id.find('-');
     if (dash_pos != std::string::npos) {
@@ -969,7 +963,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
 
-    // Find matching entries
     for (const auto& entry : stream.entries) {
         long long entry_ms, entry_seq;
         if (!parse_stream_id(entry.id, entry_ms, entry_seq)) {
@@ -987,18 +980,14 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         matched_entries.push_back(&entry);
     }
 
-    // Build RESP response
     std::string response = "*" + std::to_string(matched_entries.size()) + "\r\n";
     
     for (const auto entry : matched_entries) {
-        // Entry ID and fields array
         response += "*2\r\n";
         
-        // Entry ID
         response += "$" + std::to_string(entry->id.length()) + "\r\n";
         response += entry->id + "\r\n";
         
-        // Fields array
         response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
         for (const auto& field : entry->fields) {
             response += "$" + std::to_string(field.first.length()) + "\r\n";
