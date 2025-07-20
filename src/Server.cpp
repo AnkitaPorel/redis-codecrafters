@@ -452,6 +452,272 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 }
 
+void handle_master_connection() {
+    if (!is_replica) {
+        return;
+    }
+    
+    std::cout << "Connecting to master at " << master_host << ":" << master_port << std::endl;
+    
+    int master_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (master_fd < 0) {
+        std::cerr << "Failed to create socket for master connection" << std::endl;
+        return;
+    }
+    
+    struct sockaddr_in master_addr;
+    memset(&master_addr, 0, sizeof(master_addr));
+    master_addr.sin_family = AF_INET;
+    master_addr.sin_port = htons(master_port);
+    
+    if (master_host == "localhost") {
+        master_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    } else if (inet_aton(master_host.c_str(), &master_addr.sin_addr) == 0) {
+        struct hostent *host_entry = gethostbyname(master_host.c_str());
+        if (host_entry == nullptr) {
+            std::cerr << "Failed to resolve master hostname: " << master_host << std::endl;
+            close(master_fd);
+            return;
+        }
+        memcpy(&master_addr.sin_addr, host_entry->h_addr_list[0], host_entry->h_length);
+    }
+    
+    if (connect(master_fd, (struct sockaddr*)&master_addr, sizeof(master_addr)) < 0) {
+        std::cerr << "Failed to connect to master at " << master_host << ":" << master_port << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Connected to master successfully" << std::endl;
+    
+    // Perform handshake
+    std::string ping_command = "*1\r\n$4\r\nPING\r\n";
+    if (send(master_fd, ping_command.c_str(), ping_command.length(), 0) < 0) {
+        std::cerr << "Failed to send PING to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent PING to master" << std::endl;
+    
+    char response_buffer[4096];
+    int bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive PONG from master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response from master: " << response_buffer << std::endl;
+    
+    std::string port_str = std::to_string(server_port);
+    std::string replconf_port_command = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + 
+                                       std::to_string(port_str.length()) + "\r\n" + port_str + "\r\n";
+    
+    if (send(master_fd, replconf_port_command.c_str(), replconf_port_command.length(), 0) < 0) {
+        std::cerr << "Failed to send REPLCONF listening-port to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent REPLCONF listening-port " << server_port << " to master" << std::endl;
+    
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive OK from master for REPLCONF listening-port" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response to REPLCONF listening-port: " << response_buffer << std::endl;
+    
+    std::string replconf_capa_command = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+    
+    if (send(master_fd, replconf_capa_command.c_str(), replconf_capa_command.length(), 0) < 0) {
+        std::cerr << "Failed to send REPLCONF capa psync2 to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent REPLCONF capa psync2 to master" << std::endl;
+    
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive OK from master for REPLCONF capa" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response to REPLCONF capa: " << response_buffer << std::endl;
+    
+    std::string psync_command = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+    
+    if (send(master_fd, psync_command.c_str(), psync_command.length(), 0) < 0) {
+        std::cerr << "Failed to send PSYNC to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent PSYNC ? -1 to master" << std::endl;
+    
+    // Read FULLRESYNC response
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive FULLRESYNC from master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response to PSYNC: " << response_buffer << std::endl;
+    
+    // Read and discard the RDB file
+    // The RDB file starts with $<size>\r\n followed by the actual data
+    std::string rdb_buffer;
+    std::string current_data(response_buffer, bytes_received);
+    
+    // Find the start of RDB data
+    size_t rdb_start = current_data.find("$");
+    if (rdb_start != std::string::npos) {
+        size_t crlf_pos = current_data.find("\r\n", rdb_start);
+        if (crlf_pos != std::string::npos) {
+            std::string size_str = current_data.substr(rdb_start + 1, crlf_pos - rdb_start - 1);
+            int rdb_size = std::stoi(size_str);
+            std::cout << "Expecting RDB file of size: " << rdb_size << " bytes" << std::endl;
+            
+            // Read the remaining RDB data
+            size_t data_start = crlf_pos + 2;
+            int remaining_rdb_bytes = rdb_size - (bytes_received - data_start);
+            
+            while (remaining_rdb_bytes > 0) {
+                bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer), 0);
+                if (bytes_received <= 0) {
+                    std::cerr << "Failed to read RDB data from master" << std::endl;
+                    close(master_fd);
+                    return;
+                }
+                remaining_rdb_bytes -= bytes_received;
+            }
+            std::cout << "Successfully received and discarded RDB file" << std::endl;
+        }
+    }
+    
+    std::cout << "Handshake completed successfully. Now listening for propagated commands..." << std::endl;
+    
+    // Now continuously listen for propagated commands
+    std::string command_buffer;
+    
+    while (true) {
+        bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+        if (bytes_received <= 0) {
+            std::cerr << "Lost connection to master" << std::endl;
+            break;
+        }
+        
+        response_buffer[bytes_received] = '\0';
+        command_buffer.append(response_buffer, bytes_received);
+        
+        // Process complete commands from buffer
+        size_t pos = 0;
+        while (pos < command_buffer.length()) {
+            // Find the start of a command (should start with *)
+            size_t command_start = command_buffer.find('*', pos);
+            if (command_start == std::string::npos) {
+                break;
+            }
+            
+            // Try to parse a complete command
+            size_t search_pos = command_start;
+            size_t next_command_start = command_buffer.find('*', search_pos + 1);
+            
+            std::string potential_command;
+            if (next_command_start != std::string::npos) {
+                potential_command = command_buffer.substr(command_start, next_command_start - command_start);
+            } else {
+                potential_command = command_buffer.substr(command_start);
+            }
+            
+            // Check if we have a complete command by trying to parse it
+            try {
+                std::vector<std::string> parsed_command;
+                parse_redis_command(potential_command, parsed_command);
+                
+                // Successfully parsed a command
+                std::cout << "Received propagated command from master: ";
+                for (const auto& arg : parsed_command) {
+                    std::cout << "'" << arg << "' ";
+                }
+                std::cout << std::endl;
+                
+                // Execute the command (without sending response - this is key for replicas)
+                execute_replica_command(parsed_command);
+                
+                // Move past this command
+                pos = command_start + potential_command.length();
+                
+            } catch (const std::exception& e) {
+                // Command is incomplete or malformed
+                if (next_command_start != std::string::npos) {
+                    // There's another command start, so this one is malformed
+                    pos = next_command_start;
+                } else {
+                    // Need more data
+                    break;
+                }
+            }
+        }
+        
+        // Remove processed commands from buffer
+        if (pos > 0) {
+            command_buffer = command_buffer.substr(pos);
+        }
+    }
+    
+    close(master_fd);
+}
+
+// Add this new function to execute commands on replica without sending responses
+void execute_replica_command(const std::vector<std::string>& parsed_command) {
+    if (parsed_command.empty()) {
+        return;
+    }
+
+    std::string command = parsed_command[0];
+
+    if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
+        std::string key = parsed_command[1];
+        std::string value = parsed_command[2];
+
+        if (parsed_command.size() == 3) {
+            kv_store[key] = ValueEntry(value);
+            std::cout << "Replica: SET '" << key << "' = '" << value << "'" << std::endl;
+        } else if (parsed_command.size() == 5) {
+            std::string px_arg = parsed_command[3];
+            for (char& c : px_arg) {
+                c = std::toupper(c);
+            }
+            if (px_arg == "PX") {
+                try {
+                    long expiry_ms = std::stol(parsed_command[4]);
+                    if (expiry_ms > 0) {
+                        auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
+                        kv_store[key] = ValueEntry(value, expiry_time);
+                        std::cout << "Replica: SET '" << key << "' = '" << value << "' with expiry " << expiry_ms << "ms" << std::endl;
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "Replica: Invalid expiry time in SET command" << std::endl;
+                }
+            }
+        }
+    } else if (command == "DEL" && parsed_command.size() >= 2) {
+        for (size_t i = 1; i < parsed_command.size(); i++) {
+            std::string key = parsed_command[i];
+            kv_store.erase(key);
+            std::cout << "Replica: DEL '" << key << "'" << std::endl;
+        }
+    }
+    // Add other write commands as needed (INCR, DECR, etc.)
+}
+
 int main(int argc, char **argv) {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
@@ -511,8 +777,8 @@ int main(int argc, char **argv) {
     load_rdb_file();
 
     if (is_replica) {
-        std::thread master_connection_thread(connect_to_master);
-        master_connection_thread.detach();
+    std::thread master_connection_thread(handle_master_connection);
+    master_connection_thread.detach();
     }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -613,7 +879,7 @@ int main(int argc, char **argv) {
     for (int client_fd : client_fds) {
         close(client_fd);
     }
-    
+
     close(server_fd);
 
     return 0;
