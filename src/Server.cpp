@@ -664,109 +664,108 @@ void handle_master_connection() {
     // Main loop to listen for commands from master
     std::string command_buffer;
     
-    while (true) {
-        bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer), 0);
-        if (bytes_received <= 0) {
-            std::cout << "Master connection closed or error occurred" << std::endl;
+    // In handle_master_connection, replace the command processing loop (starting after "Main loop to listen for commands from master")
+while (true) {
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer), 0);
+    if (bytes_received <= 0) {
+        std::cout << "Master connection closed or error occurred" << std::endl;
+        break;
+    }
+    
+    // Add received data to buffer
+    command_buffer.append(response_buffer, bytes_received);
+    
+    // Process all complete commands in the buffer
+    size_t pos = 0;
+    while (pos < command_buffer.length()) {
+        // Look for start of RESP array
+        size_t array_start = command_buffer.find('*', pos);
+        if (array_start == std::string::npos) {
+            // No complete command found, break and wait for more data
             break;
         }
         
-        // Add received data to buffer
-        command_buffer.append(response_buffer, bytes_received);
-        
-        // Process all complete commands in the buffer
-        size_t pos = 0;
-        while (pos < command_buffer.length()) {
-            // Look for start of RESP array
-            size_t array_start = command_buffer.find('*', pos);
-            if (array_start == std::string::npos) {
-                // No complete command found, break and wait for more data
-                break;
-            }
+        try {
+            // Try to parse a complete command starting at array_start
+            std::vector<std::string> parsed_command;
+            std::string command_str = command_buffer.substr(array_start);
             
-            try {
-                // Try to parse a complete command starting at array_start
-                std::vector<std::string> parsed_command;
-                std::string command_str = command_buffer.substr(array_start);
+            // Parse the RESP array to find its exact boundaries
+            if (command_str[0] == '*') {
+                size_t crlf_pos = command_str.find("\r\n");
+                if (crlf_pos == std::string::npos) {
+                    break; // Incomplete command
+                }
                 
-                // We need to find the exact end of this command to calculate bytes
-                size_t command_start_pos = array_start;
-                size_t command_end_pos = command_start_pos;
+                int num_elements = std::stoi(command_str.substr(1, crlf_pos - 1));
+                size_t parse_pos = crlf_pos + 2;
                 
-                // Parse the RESP array to find its exact boundaries
-                if (command_str[0] == '*') {
-                    size_t crlf_pos = command_str.find("\r\n");
-                    if (crlf_pos == std::string::npos) {
-                        break; // Incomplete command
-                    }
-                    
-                    int num_elements = std::stoi(command_str.substr(1, crlf_pos - 1));
-                    size_t parse_pos = crlf_pos + 2;
-                    
-                    bool complete_command = true;
-                    for (int i = 0; i < num_elements; i++) {
-                        if (parse_pos >= command_str.length() || command_str[parse_pos] != '$') {
-                            complete_command = false;
-                            break;
-                        }
-                        
-                        size_t len_crlf = command_str.find("\r\n", parse_pos);
-                        if (len_crlf == std::string::npos) {
-                            complete_command = false;
-                            break;
-                        }
-                        
-                        int str_len = std::stoi(command_str.substr(parse_pos + 1, len_crlf - parse_pos - 1));
-                        parse_pos = len_crlf + 2;
-                        
-                        if (parse_pos + str_len + 2 > command_str.length()) {
-                            complete_command = false;
-                            break;
-                        }
-                        
-                        parsed_command.push_back(command_str.substr(parse_pos, str_len));
-                        parse_pos += str_len + 2; // Skip the string and \r\n
-                    }
-                    
-                    if (!complete_command) {
+                bool complete_command = true;
+                for (int i = 0; i < num_elements; i++) {
+                    if (parse_pos >= command_str.length() || command_str[parse_pos] != '$') {
+                        complete_command = false;
                         break;
                     }
                     
-                    command_end_pos = command_start_pos + parse_pos;
-                    
-                    int command_bytes = command_end_pos - command_start_pos;
-                    
-                    std::cout << "Received propagated command from master (" << command_bytes << " bytes): ";
-                    for (const auto& arg : parsed_command) {
-                        std::cout << "'" << arg << "' ";
-                    }
-                    std::cout << std::endl;
-                    
-                    std::string response = execute_replica_command(parsed_command, command_bytes);
-                    
-                    if (!response.empty()) {
-                        std::cout << "Sending response to master: " << response;
-                        if (send(master_fd, response.c_str(), response.length(), 0) < 0) {
-                            std::cerr << "Failed to send response to master" << std::endl;
-                            close(master_fd);
-                            return;
-                        }
+                    size_t len_crlf = command_str.find("\r\n", parse_pos);
+                    if (len_crlf == std::string::npos) {
+                        complete_command = false;
+                        break;
                     }
                     
-                    pos = command_end_pos;
-                } else {
-                    pos = array_start + 1;
+                    int str_len = std::stoi(command_str.substr(parse_pos + 1, len_crlf - parse_pos - 1));
+                    parse_pos = len_crlf + 2;
+                    
+                    if (parse_pos + str_len + 2 > command_str.length()) {
+                        complete_command = false;
+                        break;
+                    }
+                    
+                    parsed_command.push_back(command_str.substr(parse_pos, str_len));
+                    parse_pos += str_len + 2; // Skip the string and \r\n
                 }
                 
-            } catch (const std::exception& e) {
-                std::cout << "Parse error: " << e.what() << ", trying next position" << std::endl;
+                if (!complete_command) {
+                    break; // Wait for more data
+                }
+                
+                size_t command_end_pos = array_start + parse_pos;
+                
+                // Calculate the exact number of bytes for this command
+                int command_bytes = command_end_pos - array_start;
+                
+                std::cout << "Received propagated command from master (" << command_bytes << " bytes): ";
+                for (const auto& arg : parsed_command) {
+                    std::cout << "'" << arg << "' ";
+                }
+                std::cout << std::endl;
+                
+                std::string response = execute_replica_command(parsed_command, command_bytes);
+                
+                if (!response.empty()) {
+                    std::cout << "Sending response to master: " << response;
+                    if (send(master_fd, response.c_str(), response.length(), 0) < 0) {
+                        std::cerr << "Failed to send response to master" << std::endl;
+                        close(master_fd);
+                        return;
+                    }
+                }
+                
+                pos = command_end_pos;
+            } else {
                 pos = array_start + 1;
             }
+            
+        } catch (const std::exception& e) {
+            std::cout << "Parse error: " << e.what() << ", trying next position" << std::endl;
+            pos = array_start + 1;
         }
+    }
 
-        if (pos > 0) {
-            command_buffer = command_buffer.substr(pos);
-        }
+    // Remove processed commands from buffer
+    if (pos > 0) {
+        command_buffer = command_buffer.substr(pos);
+    }
     }
     
     close(master_fd);
