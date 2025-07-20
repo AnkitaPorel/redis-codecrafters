@@ -534,8 +534,7 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
     {
         std::lock_guard<std::mutex> lock(offset_mutex);
         replica_offset += bytes_processed;
-        replica_offsets[client_fd] = replica_offset;
-        std::cout << "Replica (fd: " << client_fd << "): Updated offset to " 
+        std::cout << "Replica: Updated offset to " 
                   << replica_offset << std::endl;
     }
     
