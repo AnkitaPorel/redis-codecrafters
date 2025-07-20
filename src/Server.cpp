@@ -554,6 +554,7 @@ void handle_master_connection() {
     
     std::cout << "Connected to master successfully" << std::endl;
     
+    // Send PING
     std::string ping_command = "*1\r\n$4\r\nPING\r\n";
     if (send(master_fd, ping_command.c_str(), ping_command.length(), 0) < 0) {
         std::cerr << "Failed to send PING to master" << std::endl;
@@ -573,6 +574,7 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response from master: " << response_buffer << std::endl;
     
+    // Send REPLCONF listening-port
     std::string port_str = std::to_string(server_port);
     std::string replconf_port_command = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + 
                                        std::to_string(port_str.length()) + "\r\n" + port_str + "\r\n";
@@ -594,6 +596,7 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to REPLCONF listening-port: " << response_buffer << std::endl;
     
+    // Send REPLCONF capa
     std::string replconf_capa_command = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
     
     if (send(master_fd, replconf_capa_command.c_str(), replconf_capa_command.length(), 0) < 0) {
@@ -613,6 +616,7 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to REPLCONF capa: " << response_buffer << std::endl;
     
+    // Send PSYNC
     std::string psync_command = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
     
     if (send(master_fd, psync_command.c_str(), psync_command.length(), 0) < 0) {
@@ -632,7 +636,7 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to PSYNC: " << response_buffer << std::endl;
     
-    std::string rdb_buffer;
+    // Process RDB file
     std::string current_data(response_buffer, bytes_received);
     
     size_t rdb_start = current_data.find("$");
@@ -661,9 +665,21 @@ void handle_master_connection() {
     
     std::cout << "Handshake completed successfully. Now listening for propagated commands..." << std::endl;
     
+    // Main loop to listen for commands from master
     std::string command_buffer;
     
-    size_t pos = 0;
+    while (true) {
+        bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer), 0);
+        if (bytes_received <= 0) {
+            std::cout << "Master connection closed or error occurred" << std::endl;
+            break;
+        }
+        
+        // Add received data to buffer
+        command_buffer.append(response_buffer, bytes_received);
+        
+        // Process all complete commands in the buffer
+        size_t pos = 0;
         while (pos < command_buffer.length()) {
             // Look for start of RESP array
             size_t array_start = command_buffer.find('*', pos);
@@ -737,7 +753,8 @@ void handle_master_connection() {
                         std::cout << "Sending response to master: " << response;
                         if (send(master_fd, response.c_str(), response.length(), 0) < 0) {
                             std::cerr << "Failed to send response to master" << std::endl;
-                            break;
+                            close(master_fd);
+                            return;
                         }
                     }
                     
@@ -752,9 +769,11 @@ void handle_master_connection() {
             }
         }
 
+        // Remove processed commands from buffer
         if (pos > 0) {
             command_buffer = command_buffer.substr(pos);
         }
+    }
     
     close(master_fd);
 }
