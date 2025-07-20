@@ -555,6 +555,7 @@ void handle_master_connection() {
 
     std::cout << "Connected to master successfully" << std::endl;
 
+    // 1. Send PING
     std::string ping_command = "*1\r\n$4\r\nPING\r\n";
     if (send(master_fd, ping_command.c_str(), ping_command.length(), 0) < 0) {
         std::cerr << "Failed to send PING to master" << std::endl;
@@ -573,6 +574,7 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response from master: " << response_buffer << std::endl;
 
+    // 2. Send REPLCONF listening-port
     std::string port_str = std::to_string(server_port);
     std::string replconf_port_command = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + 
                                      std::to_string(port_str.length()) + "\r\n" + port_str + "\r\n";
@@ -592,6 +594,7 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to REPLCONF listening-port: " << response_buffer << std::endl;
 
+    // 3. Send REPLCONF capa
     std::string replconf_capa_command = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
     if (send(master_fd, replconf_capa_command.c_str(), replconf_capa_command.length(), 0) < 0) {
         std::cerr << "Failed to send REPLCONF capa psync2 to master" << std::endl;
@@ -609,6 +612,7 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to REPLCONF capa: " << response_buffer << std::endl;
 
+    // 4. Send PSYNC
     std::string psync_command = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
     if (send(master_fd, psync_command.c_str(), psync_command.length(), 0) < 0) {
         std::cerr << "Failed to send PSYNC to master" << std::endl;
@@ -626,25 +630,49 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to PSYNC: " << response_buffer << std::endl;
 
-    std::string current_data(response_buffer, bytes_received);
-    size_t rdb_start = current_data.find("$");
+    // Handle RDB file transfer and preserve any trailing commands
+    std::string command_buffer;
+    size_t rdb_start = std::string(response_buffer).find("$");
     if (rdb_start != std::string::npos) {
-        size_t crlf_pos = current_data.find("\r\n", rdb_start);
+        size_t crlf_pos = std::string(response_buffer).find("\r\n", rdb_start);
         if (crlf_pos != std::string::npos) {
-            std::string size_str = current_data.substr(rdb_start + 1, crlf_pos - rdb_start - 1);
+            std::string size_str = std::string(response_buffer).substr(rdb_start + 1, crlf_pos - rdb_start - 1);
             int rdb_size = std::stoi(size_str);
             std::cout << "Expecting RDB file of size: " << rdb_size << " bytes" << std::endl;
 
+            // Calculate RDB data position in the buffer
             size_t data_start = crlf_pos + 2;
-            int remaining_rdb_bytes = rdb_size - (bytes_received - data_start);
+            int rdb_data_bytes_in_buffer = bytes_received - data_start;
+            if (rdb_data_bytes_in_buffer > rdb_size) {
+                rdb_data_bytes_in_buffer = rdb_size;
+            }
 
+            // Save any data after RDB file for command processing
+            if (bytes_received > static_cast<int>(data_start + rdb_size)) {
+                size_t extra_start = data_start + rdb_size;
+                size_t extra_length = bytes_received - extra_start;
+                command_buffer.append(response_buffer + extra_start, extra_length);
+                std::cout << "Saved " << extra_length << " bytes after RDB file for command processing" << std::endl;
+            }
+
+            // Read remaining RDB data
+            int remaining_rdb_bytes = rdb_size - rdb_data_bytes_in_buffer;
             while (remaining_rdb_bytes > 0) {
-                bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer), 0);
+                bytes_received = recv(master_fd, response_buffer, 
+                                    std::min(static_cast<int>(sizeof(response_buffer)), remaining_rdb_bytes), 0);
                 if (bytes_received <= 0) {
                     std::cerr << "Failed to read RDB data from master" << std::endl;
                     close(master_fd);
                     return;
                 }
+                
+                // Save any trailing data beyond RDB
+                if (bytes_received > remaining_rdb_bytes) {
+                    command_buffer.append(response_buffer + remaining_rdb_bytes, bytes_received - remaining_rdb_bytes);
+                    std::cout << "Saved " << (bytes_received - remaining_rdb_bytes) 
+                              << " extra bytes from RDB read" << std::endl;
+                }
+                
                 remaining_rdb_bytes -= bytes_received;
             }
             std::cout << "Successfully received and discarded RDB file" << std::endl;
@@ -654,17 +682,14 @@ void handle_master_connection() {
     replica_offset = 0;
     std::cout << "Handshake completed successfully. Now listening for propagated commands..." << std::endl;
 
-    std::string command_buffer;
+    // Continue with any saved commands
+    if (!command_buffer.empty()) {
+        std::cout << "Processing " << command_buffer.length() 
+                  << " bytes of saved commands" << std::endl;
+    }
 
     while (true) {
-        bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer), 0);
-        if (bytes_received <= 0) {
-            std::cout << "Master connection closed or error occurred" << std::endl;
-            break;
-        }
-
-        command_buffer.append(response_buffer, bytes_received);
-
+        // Process any existing data in command_buffer
         size_t pos = 0;
         while (pos < command_buffer.length()) {
             while (pos < command_buffer.length() && command_buffer[pos] != '*') {
@@ -679,6 +704,7 @@ void handle_master_connection() {
                 size_t command_start = pos;
                 std::vector<std::string> parsed_command;
 
+                // Parse array length
                 size_t crlf_pos = command_buffer.find("\r\n", pos);
                 if (crlf_pos == std::string::npos) {
                     break;
@@ -689,6 +715,7 @@ void handle_master_connection() {
 
                 bool complete_command = true;
 
+                // Parse each element
                 for (int i = 0; i < num_elements; i++) {
                     if (pos >= command_buffer.length() || command_buffer[pos] != '$') {
                         complete_command = false;
@@ -725,6 +752,7 @@ void handle_master_connection() {
                 }
                 std::cout << std::endl;
 
+                // Handle REPLCONF GETACK specially
                 if (!parsed_command.empty() && parsed_command[0] == "REPLCONF" && 
                     parsed_command.size() >= 2 && parsed_command[1] == "GETACK") {
                     
@@ -753,6 +781,15 @@ void handle_master_connection() {
         if (pos > 0) {
             command_buffer = command_buffer.substr(pos);
         }
+
+        // Read more data from master
+        bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer), 0);
+        if (bytes_received <= 0) {
+            std::cout << "Master connection closed or error occurred" << std::endl;
+            break;
+        }
+
+        command_buffer.append(response_buffer, bytes_received);
     }
 
     close(master_fd);
