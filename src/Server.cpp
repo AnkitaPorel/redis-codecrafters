@@ -606,13 +606,12 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         
         std::string response = ":" + std::to_string(final_acked) + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
-    } 
     } catch (const std::exception& e) {
         std::cerr << "Invalid WAIT command arguments" << std::endl;
         std::string response = "-ERR invalid arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
-     else {
+    } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
