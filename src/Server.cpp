@@ -464,7 +464,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 }
 
-std::string execute_replica_command(int client_fd, const std::vector<std::string>& parsed_command, int bytes_processed) {
+std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
     std::string response;
 
     if (!parsed_command.empty() && parsed_command[0] == "REPLCONF" && 
@@ -472,13 +472,12 @@ std::string execute_replica_command(int client_fd, const std::vector<std::string
         {
             std::lock_guard<std::mutex> lock(offset_mutex);
             replica_offset += bytes_processed;
-            replica_offsets[client_fd] = replica_offset;
             
             std::string offset_str = std::to_string(replica_offset);
             response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
                       std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
             
-            std::cout << "Replica (fd: " << client_fd << "): Sending ACK with offset " 
+            std::cout << "Replica: Sending ACK with offset " 
                       << replica_offset << std::endl;
         }
         return response;
