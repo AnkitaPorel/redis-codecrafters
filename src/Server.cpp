@@ -450,23 +450,20 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 }
 
 std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
-    replica_offset += bytes_processed;
-
-    bool should_increment_offset = true;
-
-    std::cout << "Updated offset to " << replica_offset << " after processing " << bytes_processed << " bytes\n";
+    std::string response;
 
     if (!parsed_command.empty() && parsed_command[0] == "REPLCONF" && 
         parsed_command.size() >= 2 && parsed_command[1] == "GETACK") {
-        // Format the ACK response with current offset
+        // Format the ACK response with current offset (before processing this command)
         std::string offset_str = std::to_string(replica_offset);
-        return "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
-               std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
-    }
-    
-    if (should_increment_offset) {
+        response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
+                  std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
+        
+        // Now add this command's bytes to the offset (for future ACKs)
         replica_offset += bytes_processed;
         std::cout << "Replica: Updated offset to " << replica_offset << " after processing " << bytes_processed << " bytes" << std::endl;
+        
+        return response;
     }
 
     if (parsed_command.empty()) {
@@ -480,6 +477,7 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         c = std::toupper(c);
     }
 
+    // Process other commands (SET, DEL, etc.)
     if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
         std::string key = parsed_command[1];
         std::string value = parsed_command[2];
@@ -514,6 +512,9 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
     } else if (command == "PING") {
         std::cout << "Replica: Received PING" << std::endl;
     }
+    
+    replica_offset += bytes_processed;
+    std::cout << "Replica: Updated offset to " << replica_offset << " after processing " << bytes_processed << " bytes" << std::endl;
     
     return "";
 }
