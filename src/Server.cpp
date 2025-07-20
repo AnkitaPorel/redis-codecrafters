@@ -299,23 +299,6 @@ std::pair<bool, std::string> validate_or_generate_id(const std::string& id_spec,
     }
 }
 
-// Helper function to parse a stream ID into milliseconds and sequence parts
-bool parse_stream_id(const std::string& id, long long& ms, long long& seq) {
-    size_t dash_pos = id.find('-');
-    if (dash_pos == std::string::npos || dash_pos == 0 || dash_pos == id.length() - 1) {
-        return false;
-    }
-    
-    try {
-        ms = std::stoll(id.substr(0, dash_pos));
-        seq = std::stoll(id.substr(dash_pos + 1));
-    } catch (const std::exception& e) {
-        return false;
-    }
-    
-    return true;
-}
-
 // Helper function to generate a new sequence number for a given timestamp
 long long generate_sequence_number(long long ms, const StreamData& stream) {
     // Default sequence number is 0, except when ms is 0 (then it's 1)
