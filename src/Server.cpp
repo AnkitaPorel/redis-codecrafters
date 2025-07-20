@@ -936,24 +936,26 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
 
-    long long end_ms = 0, end_seq = LLONG_MAX;
-    size_t dash_pos = end_id.find('-');
-    if (dash_pos != std::string::npos) {
-        try {
-            end_ms = std::stoll(end_id.substr(0, dash_pos));
-            if (dash_pos + 1 < end_id.length()) {
-                end_seq = std::stoll(end_id.substr(dash_pos + 1));
+    long long end_ms = LLONG_MAX, end_seq = LLONG_MAX;
+    if (end_id != "+") {
+        size_t dash_pos = end_id.find('-');
+        if (dash_pos != std::string::npos) {
+            try {
+                end_ms = std::stoll(end_id.substr(0, dash_pos));
+                if (dash_pos + 1 < end_id.length()) {
+                    end_seq = std::stoll(end_id.substr(dash_pos + 1));
+                }
+            } catch (...) {
+                send(client_fd, "-ERR Invalid end ID\r\n", 20, 0);
+                return;
             }
-        } catch (...) {
-            send(client_fd, "-ERR Invalid end ID\r\n", 20, 0);
-            return;
-        }
-    } else {
-        try {
-            end_ms = std::stoll(end_id);
-        } catch (...) {
-            send(client_fd, "-ERR Invalid end ID\r\n", 20, 0);
-            return;
+        } else {
+            try {
+                end_ms = std::stoll(end_id);
+            } catch (...) {
+                send(client_fd, "-ERR Invalid end ID\r\n", 20, 0);
+                return;
+            }
         }
     }
 
@@ -967,7 +969,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             continue;
         }
 
-        if (entry_ms > end_ms || (entry_ms == end_ms && entry_seq > end_seq)) {
+        if (end_id != "+" && (entry_ms > end_ms || (entry_ms == end_ms && entry_seq > end_seq))) {
             continue;
         }
 
