@@ -159,6 +159,12 @@ void propagate_to_replicas(const std::vector<std::string>& command) {
     }
 }
 
+long long get_current_timestamp_ms() {
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+}
+
 void send_getack_to_replicas() {
     if (connected_replicas.empty()) {
         return;
@@ -788,11 +794,36 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::string entry_id;
     bool valid_id = false;
 
-    // Check if we need to auto-generate sequence number
-    size_t dash_pos = id_spec.find('-');
-    if (dash_pos != std::string::npos && dash_pos + 1 < id_spec.length() && 
-        id_spec.substr(dash_pos + 1) == "*") {
-        // Auto-generate sequence number case
+    if (id_spec == "*") {
+        // Case 1: Auto-generate both timestamp and sequence number ("*")
+        long long ms = get_current_timestamp_ms();
+        long long seq = 0;
+
+        // Find the highest sequence number for this timestamp
+        if (!stream.entries.empty()) {
+            for (const auto& entry : stream.entries) {
+                long long entry_ms, entry_seq;
+                if (parse_stream_id(entry.id, entry_ms, entry_seq) && entry_ms == ms) {
+                    if (entry_seq >= seq) {
+                        seq = entry_seq + 1;
+                    }
+                }
+            }
+        }
+
+        entry_id = std::to_string(ms) + "-" + std::to_string(seq);
+        valid_id = true;
+    }
+    else if (id_spec.find('*') != std::string::npos) {
+        // Case 2: Auto-generate only sequence number ("timestamp-*")
+        size_t dash_pos = id_spec.find('-');
+        if (dash_pos == std::string::npos || dash_pos + 1 >= id_spec.length() || 
+            id_spec.substr(dash_pos + 1) != "*") {
+            std::string response = "-ERR Invalid stream ID specified\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+
         std::string ms_part = id_spec.substr(0, dash_pos);
         try {
             long long ms = std::stoll(ms_part);
@@ -828,8 +859,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             send(client_fd, response.c_str(), response.length(), 0);
             return;
         }
-    } else {
-        // Explicit ID case
+    }
+    else {
+        // Case 3: Explicit ID ("timestamp-seq")
         long long ms, seq;
         if (!parse_stream_id(id_spec, ms, seq)) {
             std::string response = "-ERR Invalid stream ID specified\r\n";
