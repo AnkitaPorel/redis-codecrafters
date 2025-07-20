@@ -99,6 +99,22 @@ std::string command_to_resp_array(const std::vector<std::string>& command) {
     return resp;
 }
 
+bool parse_stream_id(const std::string& id, long long& ms, long long& seq) {
+    size_t dash_pos = id.find('-');
+    if (dash_pos == std::string::npos) {
+        return false;
+    }
+    
+    try {
+        ms = std::stoll(id.substr(0, dash_pos));
+        seq = std::stoll(id.substr(dash_pos + 1));
+    } catch (const std::exception& e) {
+        return false;
+    }
+    
+    return true;
+}
+
 void propagate_to_replicas(const std::vector<std::string>& command) {
     if (is_replica || connected_replicas.empty()) {
         return;
@@ -281,22 +297,6 @@ std::pair<bool, std::string> validate_or_generate_id(const std::string& id_spec,
     } catch (const std::exception& e) {
         return {false, ""};
     }
-}
-
-bool parse_stream_id(const std::string& id, long long& ms, long long& seq) {
-    size_t dash_pos = id.find('-');
-    if (dash_pos == std::string::npos) {
-        return false;
-    }
-    
-    try {
-        ms = std::stoll(id.substr(0, dash_pos));
-        seq = std::stoll(id.substr(dash_pos + 1));
-    } catch (const std::exception& e) {
-        return false;
-    }
-    
-    return true;
 }
 
 // Helper function to parse a stream ID into milliseconds and sequence parts
