@@ -544,7 +544,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             return;
         }
         
-        // If no write commands have been sent (master_offset is 0), return current replica count
         if (master_offset == 0) {
             std::string response = ":" + std::to_string(current_connected) + "\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
@@ -552,14 +551,12 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             return;
         }
         
-        // Reset counters and set expectations
         {
             std::lock_guard<std::mutex> wait_lock(wait_mutex);
             pending_wait_offset = master_offset;
             expected_replicas = num_replicas_expected;
             acked_replicas = 0;
             
-            // Initialize ack offsets for all connected replicas if not already done
             for (int replica_fd : connected_replicas) {
                 if (replica_ack_offsets.find(replica_fd) == replica_ack_offsets.end()) {
                     replica_ack_offsets[replica_fd] = 0;
@@ -567,17 +564,14 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
         }
         
-        // Send GETACK to all replicas
         send_getack_to_replicas();
         
-        // Non-blocking wait with periodic checks
         int final_acked = 0;
         auto start_time = std::chrono::steady_clock::now();
         auto timeout_time = start_time + std::chrono::milliseconds(timeout_ms);
         std::set<int> replicas_to_remove;
         
         while (true) {
-            // Check current ACK count
             {
                 std::lock_guard<std::mutex> lock(wait_mutex);
                 final_acked = acked_replicas;
@@ -594,14 +588,12 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 break;
             }
             
-            // Calculate remaining time
             auto remaining_time = timeout_time - now;
             auto remaining_us = std::chrono::duration_cast<std::chrono::microseconds>(remaining_time).count();
             struct timeval tv;
             tv.tv_sec = remaining_us / 1000000;
             tv.tv_usec = remaining_us % 1000000;
             
-            // Cap at 10ms for responsiveness
             if (tv.tv_sec > 0 || tv.tv_usec > 10000) {
                 tv.tv_sec = 0;
                 tv.tv_usec = 10000;
@@ -611,20 +603,17 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             FD_ZERO(&read_fds);
             int max_fd = -1;
             
-            // Add replica sockets
             for (int fd : connected_replicas) {
                 FD_SET(fd, &read_fds);
                 if (fd > max_fd) max_fd = fd;
             }
             
-            // Wait for data with timeout
             int n = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
             if (n < 0) {
                 std::cerr << "select error in WAIT: " << strerror(errno) << std::endl;
                 continue;
             }
             
-            // Process incoming data from replicas
             replicas_to_remove.clear();
             for (int fd : connected_replicas) {
                 if (FD_ISSET(fd, &read_fds)) {
@@ -635,11 +624,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                         parse_redis_command(std::string(buffer, bytes), cmd);
                         execute_redis_command(fd, cmd);
                     } else if (bytes <= 0) {
-                        // Replica disconnected
                         std::cout << "Replica (fd: " << fd << ") disconnected during WAIT" << std::endl;
                         replicas_to_remove.insert(fd);
                         
-                        // If replica had already ACK'd, decrement count
                         {
                             std::lock_guard<std::mutex> lock(wait_mutex);
                             if (replica_ack_offsets[fd] >= pending_wait_offset) {
@@ -650,7 +637,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 }
             }
             
-            // Remove disconnected replicas
             for (int fd : replicas_to_remove) {
                 connected_replicas.erase(fd);
                 replica_info.erase(fd);
@@ -661,7 +647,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
         }
         
-        // Final check after loop
         {
             std::lock_guard<std::mutex> lock(wait_mutex);
             final_acked = acked_replicas;
@@ -675,7 +660,19 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "-ERR invalid arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
+    } else if (command == "TYPE" && parsed_command.size() == 2) {
+    std::string key = parsed_command[1];
+    std::string response;
+    
+    auto it = kv_store.find(key);
+    if (it != kv_store.end()) {
+        response = "+string\r\n";
     } else {
+        response = "+none\r\n";
+    }
+    
+    send(client_fd, response.c_str(), response.length(), 0);
+} else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
