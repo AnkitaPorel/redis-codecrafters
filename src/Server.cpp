@@ -77,13 +77,11 @@ void propagate_to_replicas(const std::vector<std::string>& command) {
     std::string resp_command = command_to_resp_array(command);
     std::cout << "Propagating command to " << connected_replicas.size() << " replicas: " << resp_command;
     
-    // Send to all connected replicas
     for (auto it = connected_replicas.begin(); it != connected_replicas.end();) {
         int replica_fd = *it;
         ssize_t bytes_sent = send(replica_fd, resp_command.c_str(), resp_command.length(), MSG_NOSIGNAL);
         
         if (bytes_sent < 0) {
-            // Replica connection failed, remove from set
             std::cout << "Failed to send to replica (fd: " << replica_fd << "), removing from replica list" << std::endl;
             replica_info.erase(replica_fd);
             it = connected_replicas.erase(it);
@@ -298,7 +296,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "+OK\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         
-        // Propagate SET command to replicas (only if this is from a regular client, not a replica)
         if (connected_replicas.find(client_fd) == connected_replicas.end()) {
             propagate_to_replicas(parsed_command);
         }
@@ -443,6 +440,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             std::string response = "-ERR partial sync not supported\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         }
+    } else if (command == "WAIT" && parsed_command.size() == 3) {
+        std::string response = ":0\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -454,12 +454,10 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
 
     if (!parsed_command.empty() && parsed_command[0] == "REPLCONF" && 
         parsed_command.size() >= 2 && parsed_command[1] == "GETACK") {
-        // Format the ACK response with current offset (before processing this command)
         std::string offset_str = std::to_string(replica_offset);
         response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
                   std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
         
-        // Now add this command's bytes to the offset (for future ACKs)
         replica_offset += bytes_processed;
         std::cout << "Replica: Updated offset to " << replica_offset << " after processing " << bytes_processed << " bytes" << std::endl;
         
@@ -472,12 +470,10 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
 
     std::string command = parsed_command[0];
     
-    // Convert to uppercase
     for (char& c : command) {
         c = std::toupper(c);
     }
 
-    // Process other commands (SET, DEL, etc.)
     if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
         std::string key = parsed_command[1];
         std::string value = parsed_command[2];
@@ -559,7 +555,6 @@ void handle_master_connection() {
 
     std::cout << "Connected to master successfully" << std::endl;
 
-    // 1. Send PING
     std::string ping_command = "*1\r\n$4\r\nPING\r\n";
     if (send(master_fd, ping_command.c_str(), ping_command.length(), 0) < 0) {
         std::cerr << "Failed to send PING to master" << std::endl;
@@ -578,7 +573,6 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response from master: " << response_buffer << std::endl;
 
-    // 2. Send REPLCONF listening-port
     std::string port_str = std::to_string(server_port);
     std::string replconf_port_command = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + 
                                      std::to_string(port_str.length()) + "\r\n" + port_str + "\r\n";
@@ -598,7 +592,6 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to REPLCONF listening-port: " << response_buffer << std::endl;
 
-    // 3. Send REPLCONF capa
     std::string replconf_capa_command = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
     if (send(master_fd, replconf_capa_command.c_str(), replconf_capa_command.length(), 0) < 0) {
         std::cerr << "Failed to send REPLCONF capa psync2 to master" << std::endl;
@@ -616,7 +609,6 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to REPLCONF capa: " << response_buffer << std::endl;
 
-    // 4. Send PSYNC
     std::string psync_command = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
     if (send(master_fd, psync_command.c_str(), psync_command.length(), 0) < 0) {
         std::cerr << "Failed to send PSYNC to master" << std::endl;
@@ -634,7 +626,6 @@ void handle_master_connection() {
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to PSYNC: " << response_buffer << std::endl;
 
-    // Handle RDB file transfer
     std::string current_data(response_buffer, bytes_received);
     size_t rdb_start = current_data.find("$");
     if (rdb_start != std::string::npos) {
@@ -660,7 +651,6 @@ void handle_master_connection() {
         }
     }
 
-    // Reset offset after handshake complete
     replica_offset = 0;
     std::cout << "Handshake completed successfully. Now listening for propagated commands..." << std::endl;
 
@@ -689,7 +679,6 @@ void handle_master_connection() {
                 size_t command_start = pos;
                 std::vector<std::string> parsed_command;
 
-                // Parse array length
                 size_t crlf_pos = command_buffer.find("\r\n", pos);
                 if (crlf_pos == std::string::npos) {
                     break;
@@ -700,7 +689,6 @@ void handle_master_connection() {
 
                 bool complete_command = true;
 
-                // Parse each element
                 for (int i = 0; i < num_elements; i++) {
                     if (pos >= command_buffer.length() || command_buffer[pos] != '$') {
                         complete_command = false;
@@ -737,7 +725,6 @@ void handle_master_connection() {
                 }
                 std::cout << std::endl;
 
-                // Handle REPLCONF GETACK specially
                 if (!parsed_command.empty() && parsed_command[0] == "REPLCONF" && 
                     parsed_command.size() >= 2 && parsed_command[1] == "GETACK") {
                     
@@ -752,11 +739,9 @@ void handle_master_connection() {
                         return;
                     }
 
-                    // Update offset after sending response
                     replica_offset += command_bytes;
                     std::cout << "Updated offset to " << replica_offset << " after processing " << command_bytes << " bytes" << std::endl;
                 } else {
-                    // Process other commands normally
                     execute_replica_command(parsed_command, command_bytes);
                 }
             } catch (const std::exception& e) {
