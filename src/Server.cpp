@@ -4,6 +4,7 @@
 #include <cstring>
 #include <vector>
 #include <map>
+#include <set>
 #include <chrono>
 #include <unistd.h>
 #include <sys/types.h>
@@ -42,9 +43,57 @@ std::string master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 int master_repl_offset = 0;
 
 std::map<int, std::map<std::string, std::string>> replica_info;
+// Track which client connections are replicas (completed handshake)
+std::set<int> connected_replicas;
 
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
+}
+
+// Helper function to check if a command is a write command that should be propagated
+bool is_write_command(const std::string& command) {
+    return (command == "SET" || command == "DEL" || command == "INCR" || command == "DECR" || 
+            command == "LPUSH" || command == "RPUSH" || command == "LPOP" || command == "RPOP" ||
+            command == "SADD" || command == "SREM" || command == "HSET" || command == "HDEL");
+}
+
+// Helper function to convert command back to RESP array format
+std::string command_to_resp_array(const std::vector<std::string>& command) {
+    std::string resp = "*" + std::to_string(command.size()) + "\r\n";
+    for (const std::string& arg : command) {
+        resp += "$" + std::to_string(arg.length()) + "\r\n" + arg + "\r\n";
+    }
+    return resp;
+}
+
+// Function to propagate write commands to all connected replicas
+void propagate_to_replicas(const std::vector<std::string>& command) {
+    if (is_replica || connected_replicas.empty()) {
+        return; // Don't propagate if we're a replica or have no replicas
+    }
+    
+    if (!is_write_command(command[0])) {
+        return; // Only propagate write commands
+    }
+    
+    std::string resp_command = command_to_resp_array(command);
+    std::cout << "Propagating command to " << connected_replicas.size() << " replicas: " << resp_command;
+    
+    // Send to all connected replicas
+    for (auto it = connected_replicas.begin(); it != connected_replicas.end();) {
+        int replica_fd = *it;
+        ssize_t bytes_sent = send(replica_fd, resp_command.c_str(), resp_command.length(), MSG_NOSIGNAL);
+        
+        if (bytes_sent < 0) {
+            // Replica connection failed, remove from set
+            std::cout << "Failed to send to replica (fd: " << replica_fd << "), removing from replica list" << std::endl;
+            replica_info.erase(replica_fd);
+            it = connected_replicas.erase(it);
+        } else {
+            std::cout << "Successfully sent command to replica (fd: " << replica_fd << ")" << std::endl;
+            ++it;
+        }
+    }
 }
 
 void load_rdb_file() {
@@ -247,8 +296,15 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 return;
             }
         }
+        
         std::string response = "+OK\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
+        
+        // Propagate SET command to replicas (only if this is from a regular client, not a replica)
+        if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+            propagate_to_replicas(parsed_command);
+        }
+        
     } else if (command == "GET" && parsed_command.size() == 2) {
         std::string key = parsed_command[1];
         std::cout << "GET request for key: '" << key << "'" << std::endl;
@@ -381,6 +437,11 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             
             std::cout << "Sending RDB file data (" << rdb_data.size() << " bytes)" << std::endl;
             send(client_fd, rdb_data.data(), rdb_data.size(), 0);
+            
+            // Mark this connection as a replica that has completed handshake
+            connected_replicas.insert(client_fd);
+            std::cout << "Replica (fd: " << client_fd << ") handshake completed. Now tracking for command propagation." << std::endl;
+            
         } else {
             std::string response = "-ERR partial sync not supported\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
@@ -527,6 +588,7 @@ int main(int argc, char **argv) {
                 if (bytes_received <= 0) {
                     std::cout << "Client disconnected (fd: " << client_fd << ")\n";
                     replica_info.erase(client_fd);
+                    connected_replicas.erase(client_fd);
                     close(client_fd);
                     it = client_fds.erase(it);
                     continue;
@@ -551,6 +613,7 @@ int main(int argc, char **argv) {
     for (int client_fd : client_fds) {
         close(client_fd);
     }
+    
     close(server_fd);
 
     return 0;
