@@ -452,15 +452,27 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 }
 
-// Add this new function to execute commands on replica without sending responses
-void execute_replica_command(const std::vector<std::string>& parsed_command) {
+std::string execute_replica_command(const std::vector<std::string>& parsed_command) {
     if (parsed_command.empty()) {
-        return;
+        return "";
     }
 
     std::string command = parsed_command[0];
 
-    if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
+    if (command == "REPLCONF" && parsed_command.size() == 2) {
+        std::string subcommand = parsed_command[1];
+        
+        for (char& c : subcommand) {
+            c = std::toupper(c);
+        }
+        
+        if (subcommand == "GETACK") {
+            // Return REPLCONF ACK 0 response
+            std::string response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n";
+            std::cout << "Replica: Responding to GETACK with ACK 0" << std::endl;
+            return response;
+        }
+    } else if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
         std::string key = parsed_command[1];
         std::string value = parsed_command[2];
 
@@ -491,7 +503,11 @@ void execute_replica_command(const std::vector<std::string>& parsed_command) {
             kv_store.erase(key);
             std::cout << "Replica: DEL '" << key << "'" << std::endl;
         }
+    } else if (command == "PING") {
+        std::cout << "Replica: Received PING (no response sent)" << std::endl;
     }
+    
+    return ""; // No response for most commands
 }
 
 void handle_master_connection() {
@@ -654,16 +670,13 @@ void handle_master_connection() {
         response_buffer[bytes_received] = '\0';
         command_buffer.append(response_buffer, bytes_received);
         
-        // Process complete commands from buffer
         size_t pos = 0;
         while (pos < command_buffer.length()) {
-            // Find the start of a command (should start with *)
             size_t command_start = command_buffer.find('*', pos);
             if (command_start == std::string::npos) {
                 break;
             }
             
-            // Try to parse a complete command
             size_t search_pos = command_start;
             size_t next_command_start = command_buffer.find('*', search_pos + 1);
             
@@ -674,37 +687,37 @@ void handle_master_connection() {
                 potential_command = command_buffer.substr(command_start);
             }
             
-            // Check if we have a complete command by trying to parse it
             try {
                 std::vector<std::string> parsed_command;
                 parse_redis_command(potential_command, parsed_command);
                 
-                // Successfully parsed a command
                 std::cout << "Received propagated command from master: ";
                 for (const auto& arg : parsed_command) {
                     std::cout << "'" << arg << "' ";
                 }
                 std::cout << std::endl;
                 
-                // Execute the command (without sending response - this is key for replicas)
-                execute_replica_command(parsed_command);
+                std::string response = execute_replica_command(parsed_command);
                 
-                // Move past this command
+                if (!response.empty()) {
+                    std::cout << "Sending response to master: " << response;
+                    if (send(master_fd, response.c_str(), response.length(), 0) < 0) {
+                        std::cerr << "Failed to send response to master" << std::endl;
+                        break;
+                    }
+                }
+                
                 pos = command_start + potential_command.length();
                 
             } catch (const std::exception& e) {
-                // Command is incomplete or malformed
                 if (next_command_start != std::string::npos) {
-                    // There's another command start, so this one is malformed
                     pos = next_command_start;
                 } else {
-                    // Need more data
                     break;
                 }
             }
         }
         
-        // Remove processed commands from buffer
         if (pos > 0) {
             command_buffer = command_buffer.substr(pos);
         }
