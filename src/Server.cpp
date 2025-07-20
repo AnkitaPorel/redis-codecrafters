@@ -523,22 +523,22 @@ void handle_master_connection() {
     if (!is_replica) {
         return;
     }
-    
+
     replica_offset = 0;
 
     std::cout << "Connecting to master at " << master_host << ":" << master_port << std::endl;
-    
+
     int master_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (master_fd < 0) {
         std::cerr << "Failed to create socket for master connection" << std::endl;
         return;
     }
-    
+
     struct sockaddr_in master_addr;
     memset(&master_addr, 0, sizeof(master_addr));
     master_addr.sin_family = AF_INET;
     master_addr.sin_port = htons(master_port);
-    
+
     if (master_host == "localhost") {
         master_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     } else if (inet_aton(master_host.c_str(), &master_addr.sin_addr) == 0) {
@@ -550,16 +550,16 @@ void handle_master_connection() {
         }
         memcpy(&master_addr.sin_addr, host_entry->h_addr_list[0], host_entry->h_length);
     }
-    
+
     if (connect(master_fd, (struct sockaddr*)&master_addr, sizeof(master_addr)) < 0) {
         std::cerr << "Failed to connect to master at " << master_host << ":" << master_port << std::endl;
         close(master_fd);
         return;
     }
-    
+
     std::cout << "Connected to master successfully" << std::endl;
-    
-    // Step 1: Send PING
+
+    // 1. Send PING
     std::string ping_command = "*1\r\n$4\r\nPING\r\n";
     if (send(master_fd, ping_command.c_str(), ping_command.length(), 0) < 0) {
         std::cerr << "Failed to send PING to master" << std::endl;
@@ -567,7 +567,7 @@ void handle_master_connection() {
         return;
     }
     std::cout << "Sent PING to master" << std::endl;
-    
+
     char response_buffer[4096];
     int bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
     if (bytes_received <= 0) {
@@ -577,18 +577,18 @@ void handle_master_connection() {
     }
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response from master: " << response_buffer << std::endl;
-    
-    // Step 2: Send REPLCONF listening-port
+
+    // 2. Send REPLCONF listening-port
     std::string port_str = std::to_string(server_port);
     std::string replconf_port_command = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + 
-                                       std::to_string(port_str.length()) + "\r\n" + port_str + "\r\n";
+                                     std::to_string(port_str.length()) + "\r\n" + port_str + "\r\n";
     if (send(master_fd, replconf_port_command.c_str(), replconf_port_command.length(), 0) < 0) {
         std::cerr << "Failed to send REPLCONF listening-port to master" << std::endl;
         close(master_fd);
         return;
     }
     std::cout << "Sent REPLCONF listening-port " << server_port << " to master" << std::endl;
-    
+
     bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
     if (bytes_received <= 0) {
         std::cerr << "Failed to receive OK from master for REPLCONF listening-port" << std::endl;
@@ -597,8 +597,8 @@ void handle_master_connection() {
     }
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to REPLCONF listening-port: " << response_buffer << std::endl;
-    
-    // Step 3: Send REPLCONF capa
+
+    // 3. Send REPLCONF capa
     std::string replconf_capa_command = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
     if (send(master_fd, replconf_capa_command.c_str(), replconf_capa_command.length(), 0) < 0) {
         std::cerr << "Failed to send REPLCONF capa psync2 to master" << std::endl;
@@ -606,7 +606,7 @@ void handle_master_connection() {
         return;
     }
     std::cout << "Sent REPLCONF capa psync2 to master" << std::endl;
-    
+
     bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
     if (bytes_received <= 0) {
         std::cerr << "Failed to receive OK from master for REPLCONF capa" << std::endl;
@@ -615,8 +615,8 @@ void handle_master_connection() {
     }
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to REPLCONF capa: " << response_buffer << std::endl;
-    
-    // Step 4: Send PSYNC
+
+    // 4. Send PSYNC
     std::string psync_command = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
     if (send(master_fd, psync_command.c_str(), psync_command.length(), 0) < 0) {
         std::cerr << "Failed to send PSYNC to master" << std::endl;
@@ -624,9 +624,8 @@ void handle_master_connection() {
         return;
     }
     std::cout << "Sent PSYNC ? -1 to master" << std::endl;
-    
-    char response_buffer[4096];
-    int bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
     if (bytes_received <= 0) {
         std::cerr << "Failed to receive FULLRESYNC from master" << std::endl;
         close(master_fd);
@@ -634,10 +633,9 @@ void handle_master_connection() {
     }
     response_buffer[bytes_received] = '\0';
     std::cout << "Received response to PSYNC: " << response_buffer << std::endl;
-    
-    std::string current_data(response_buffer, bytes_received);
-    
+
     // Handle RDB file transfer
+    std::string current_data(response_buffer, bytes_received);
     size_t rdb_start = current_data.find("$");
     if (rdb_start != std::string::npos) {
         size_t crlf_pos = current_data.find("\r\n", rdb_start);
@@ -645,10 +643,10 @@ void handle_master_connection() {
             std::string size_str = current_data.substr(rdb_start + 1, crlf_pos - rdb_start - 1);
             int rdb_size = std::stoi(size_str);
             std::cout << "Expecting RDB file of size: " << rdb_size << " bytes" << std::endl;
-            
+
             size_t data_start = crlf_pos + 2;
             int remaining_rdb_bytes = rdb_size - (bytes_received - data_start);
-            
+
             while (remaining_rdb_bytes > 0) {
                 bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer), 0);
                 if (bytes_received <= 0) {
@@ -661,85 +659,84 @@ void handle_master_connection() {
             std::cout << "Successfully received and discarded RDB file" << std::endl;
         }
     }
-    
+
     // Reset offset after handshake complete
     replica_offset = 0;
     std::cout << "Handshake completed successfully. Now listening for propagated commands..." << std::endl;
-    
+
     std::string command_buffer;
-    
+
     while (true) {
         bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer), 0);
         if (bytes_received <= 0) {
             std::cout << "Master connection closed or error occurred" << std::endl;
             break;
         }
-        
+
         command_buffer.append(response_buffer, bytes_received);
-        
+
         size_t pos = 0;
         while (pos < command_buffer.length()) {
-            // Skip any whitespace or non-command characters
             while (pos < command_buffer.length() && command_buffer[pos] != '*') {
                 pos++;
             }
-            
+
             if (pos >= command_buffer.length()) {
                 break;
             }
-            
+
             try {
                 size_t command_start = pos;
                 std::vector<std::string> parsed_command;
-                
+
                 // Parse array length
                 size_t crlf_pos = command_buffer.find("\r\n", pos);
                 if (crlf_pos == std::string::npos) {
                     break;
                 }
-                
+
                 int num_elements = std::stoi(command_buffer.substr(pos + 1, crlf_pos - pos - 1));
                 pos = crlf_pos + 2;
-                
+
                 bool complete_command = true;
-                
+
                 // Parse each element
                 for (int i = 0; i < num_elements; i++) {
                     if (pos >= command_buffer.length() || command_buffer[pos] != '$') {
                         complete_command = false;
                         break;
                     }
-                    
+
                     size_t len_crlf = command_buffer.find("\r\n", pos);
                     if (len_crlf == std::string::npos) {
                         complete_command = false;
                         break;
                     }
-                    
+
                     int str_len = std::stoi(command_buffer.substr(pos + 1, len_crlf - pos - 1));
                     pos = len_crlf + 2;
-                    
+
                     if (pos + str_len + 2 > command_buffer.length()) {
                         complete_command = false;
                         break;
                     }
-                    
+
                     parsed_command.push_back(command_buffer.substr(pos, str_len));
                     pos += str_len + 2;
                 }
-                
+
                 if (!complete_command) {
                     break;
                 }
-                
+
                 int command_bytes = pos - command_start;
-                
+
                 std::cout << "Received propagated command from master (" << command_bytes << " bytes): ";
                 for (const auto& arg : parsed_command) {
                     std::cout << "'" << arg << "' ";
                 }
                 std::cout << std::endl;
-                
+
                 // Handle REPLCONF GETACK specially
                 if (!parsed_command.empty() && parsed_command[0] == "REPLCONF" && 
                     parsed_command.size() >= 2 && parsed_command[1] == "GETACK") {
@@ -747,14 +744,14 @@ void handle_master_connection() {
                     std::string offset_str = std::to_string(replica_offset);
                     std::string response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
                                          std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
-                    
+
                     std::cout << "Sending response to master: " << response;
                     if (send(master_fd, response.c_str(), response.length(), 0) < 0) {
                         std::cerr << "Failed to send response to master" << std::endl;
                         close(master_fd);
                         return;
                     }
-                    
+
                     // Update offset after sending response
                     replica_offset += command_bytes;
                     std::cout << "Updated offset to " << replica_offset << " after processing " << command_bytes << " bytes" << std::endl;
@@ -767,7 +764,7 @@ void handle_master_connection() {
                 pos++;
             }
         }
-        
+
         if (pos > 0) {
             command_buffer = command_buffer.substr(pos);
         }
