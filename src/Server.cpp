@@ -467,15 +467,23 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
     std::string response;
 
+    // Handle REPLCONF GETACK command
     if (!parsed_command.empty() && parsed_command[0] == "REPLCONF" && 
         parsed_command.size() >= 2 && parsed_command[1] == "GETACK") {
-        std::string offset_str = std::to_string(replica_offset);
-        response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
-                  std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
-        
-        replica_offset += bytes_processed;
-        std::cout << "Replica: Updated offset to " << replica_offset << " after processing " << bytes_processed << " bytes" << std::endl;
-        
+        {
+            std::lock_guard<std::mutex> lock(offset_mutex);
+            // Update replica's offset with the bytes processed for this command
+            replica_offset += bytes_processed;
+            // Store the current offset for this replica
+            replica_offsets[client_fd] = replica_offset;
+            
+            std::string offset_str = std::to_string(replica_offset);
+            response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
+                      std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
+            
+            std::cout << "Replica (fd: " << client_fd << "): Sending ACK with offset " 
+                      << replica_offset << std::endl;
+        }
         return response;
     }
 
@@ -485,10 +493,12 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
 
     std::string command = parsed_command[0];
     
+    // Convert to uppercase for case-insensitive comparison
     for (char& c : command) {
         c = std::toupper(c);
     }
 
+    // Process other commands
     if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
         std::string key = parsed_command[1];
         std::string value = parsed_command[2];
@@ -507,73 +517,34 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
                     if (expiry_ms > 0) {
                         auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
                         kv_store[key] = ValueEntry(value, expiry_time);
-                        std::cout << "Replica: SET '" << key << "' = '" << value << "' with expiry " << expiry_ms << "ms" << std::endl;
+                        std::cout << "Replica: SET '" << key << "' = '" << value 
+                                  << "' with expiry " << expiry_ms << "ms" << std::endl;
                     }
                 } catch (const std::exception& e) {
                     std::cerr << "Replica: Invalid expiry time in SET command" << std::endl;
                 }
             }
         }
-    } else if (command == "DEL" && parsed_command.size() >= 2) {
+    } 
+    else if (command == "DEL" && parsed_command.size() >= 2) {
         for (size_t i = 1; i < parsed_command.size(); i++) {
             std::string key = parsed_command[i];
             kv_store.erase(key);
             std::cout << "Replica: DEL '" << key << "'" << std::endl;
         }
-    } else if (command == "PING") {
+    } 
+    else if (command == "PING") {
         std::cout << "Replica: Received PING" << std::endl;
-    } else if (command == "WAIT" && parsed_command.size() == 3) {
-        try {
-            int num_replicas_requested = std::stoi(parsed_command[1]);
-            int timeout_ms = std::stoi(parsed_command[2]);
-        
-            if (num_replicas_requested < 0 || timeout_ms < 0) {
-                std::string response = "-ERR invalid arguments\r\n";
-                send(client_fd, response.c_str(), response.length(), 0);
-                return;
-            }
-        
-            int num_acknowledged = 0;
-            auto start_time = std::chrono::steady_clock::now();
-            auto timeout = std::chrono::milliseconds(timeout_ms);
-        
-            while (true) {
-                {
-                    std::lock_guard<std::mutex> lock(offset_mutex);
-                    num_acknowledged = 0;
-                
-                    for (const auto& pair : replica_offsets) {
-                        if (pair.second >= master_offset) {
-                            num_acknowledged++;
-                        }
-                    }
-                
-                    if (num_acknowledged >= num_replicas_requested || 
-                        connected_replicas.size() < num_replicas_requested) {
-                        break;
-                    }
-                }
-            
-                auto elapsed = std::chrono::steady_clock::now() - start_time;
-                if (elapsed >= timeout) {
-                    break;
-                }
-            
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-        
-            std::string response = ":" + std::to_string(num_acknowledged) + "\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            std::cout << "WAIT: " << num_acknowledged << "/" << num_replicas_requested 
-                  << " replicas acknowledged" << std::endl;
-        } catch (const std::exception& e) {
-            std::string response = "-ERR invalid arguments\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-        }
     }
     
-    replica_offset += bytes_processed;
-    std::cout << "Replica: Updated offset to " << replica_offset << " after processing " << bytes_processed << " bytes" << std::endl;
+    // Update offset for all processed commands
+    {
+        std::lock_guard<std::mutex> lock(offset_mutex);
+        replica_offset += bytes_processed;
+        replica_offsets[client_fd] = replica_offset;
+        std::cout << "Replica (fd: " << client_fd << "): Updated offset to " 
+                  << replica_offset << std::endl;
+    }
     
     return "";
 }
