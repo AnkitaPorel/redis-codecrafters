@@ -453,33 +453,15 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
     replica_offset += bytes_processed;
 
     bool should_increment_offset = true;
-    
-    std::cout << "Replica: Updated offset to " << replica_offset << " after processing " << bytes_processed << " bytes" << std::endl;
 
-    if (!parsed_command.empty()) {
-        std::string command = parsed_command[0];
-        
-        // Convert command to uppercase for comparison
-        for (char& c : command) {
-            c = std::toupper(c);
-        }
-        
-        if (command == "REPLCONF" && parsed_command.size() >= 2) {
-            std::string subcommand = parsed_command[1];
-            
-            for (char& c : subcommand) {
-                c = std::toupper(c);
-            }
-            
-            if (subcommand == "GETACK") {
-                std::cout << "Replica: Responding to GETACK with ACK " << replica_offset << std::endl;
-                
-                std::string offset_str = std::to_string(replica_offset);
-                std::string ack_response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
-                                           std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
-                return ack_response;
-            }
-        }
+    std::cout << "Updated offset to " << replica_offset << " after processing " << bytes_processed << " bytes\n";
+
+    if (!parsed_command.empty() && parsed_command[0] == "REPLCONF" && 
+        parsed_command.size() >= 2 && parsed_command[1] == "GETACK") {
+        // Format the ACK response with current offset
+        std::string offset_str = std::to_string(replica_offset);
+        return "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
+               std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
     }
     
     if (should_increment_offset) {
@@ -541,6 +523,8 @@ void handle_master_connection() {
         return;
     }
     
+    replica_offset = 0;
+
     std::cout << "Connecting to master at " << master_host << ":" << master_port << std::endl;
     
     int master_fd = socket(AF_INET, SOCK_STREAM, 0);
