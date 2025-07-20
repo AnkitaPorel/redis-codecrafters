@@ -8,6 +8,8 @@
 void parse_redis_command(const std::string& input, std::vector<std::string>& output) {
     output.clear();
     
+    std::cout << "Raw buffer: " << input << std::endl;
+
     if (input.empty() || input[0] != '*') {
         throw std::runtime_error("Invalid RESP array format");
     }
@@ -48,6 +50,11 @@ void parse_redis_command(const std::string& input, std::vector<std::string>& out
         for (char& c : output[0]) {
             c = std::toupper(c);
         }
+    }
+
+    std::cout << "Parsed command (" << output.size() << " elements):" << std::endl;
+    for (const auto& arg : output) {
+        std::cout << "  '" << arg << "'" << std::endl;
     }
 }
 
