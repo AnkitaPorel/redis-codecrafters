@@ -464,17 +464,14 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 }
 
-std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
+std::string execute_replica_command(int client_fd, const std::vector<std::string>& parsed_command, int bytes_processed) {
     std::string response;
 
-    // Handle REPLCONF GETACK command
     if (!parsed_command.empty() && parsed_command[0] == "REPLCONF" && 
         parsed_command.size() >= 2 && parsed_command[1] == "GETACK") {
         {
             std::lock_guard<std::mutex> lock(offset_mutex);
-            // Update replica's offset with the bytes processed for this command
             replica_offset += bytes_processed;
-            // Store the current offset for this replica
             replica_offsets[client_fd] = replica_offset;
             
             std::string offset_str = std::to_string(replica_offset);
@@ -493,12 +490,10 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
 
     std::string command = parsed_command[0];
     
-    // Convert to uppercase for case-insensitive comparison
     for (char& c : command) {
         c = std::toupper(c);
     }
 
-    // Process other commands
     if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
         std::string key = parsed_command[1];
         std::string value = parsed_command[2];
@@ -537,7 +532,6 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         std::cout << "Replica: Received PING" << std::endl;
     }
     
-    // Update offset for all processed commands
     {
         std::lock_guard<std::mutex> lock(offset_mutex);
         replica_offset += bytes_processed;
