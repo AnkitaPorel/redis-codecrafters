@@ -686,7 +686,8 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     // Debug output
     std::cout << "Processing XADD command with " << parsed_command.size() << " arguments" << std::endl;
     
-    if (parsed_command.size() < 4 || (parsed_command.size() % 2 != 0)) {
+    // Minimum command: XADD key ID field value (5 args)
+    if (parsed_command.size() < 5 || (parsed_command.size() - 3) % 2 != 0) {
         std::string response = "-ERR wrong number of arguments for XADD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
@@ -724,7 +725,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     if (connected_replicas.find(client_fd) == connected_replicas.end()) {
         propagate_to_replicas(parsed_command);
     }
-    } else if (command == "TYPE" && parsed_command.size() == 2) {
+}
+
+ else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
     
