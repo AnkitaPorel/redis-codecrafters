@@ -454,10 +454,57 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             send(client_fd, response.c_str(), response.length(), 0);
         }
     } else if (command == "WAIT" && parsed_command.size() == 3) {
-        int num_replicas = connected_replicas.size();
-        std::string response = ":" + std::to_string(num_replicas) + "\r\n";
+        try {
+        int numreplicas = std::stoi(parsed_command[1]);
+        int timeout_ms = std::stoi(parsed_command[2]);
+        
+        auto start_time = std::chrono::steady_clock::now();
+        auto timeout = std::chrono::milliseconds(timeout_ms);
+        
+        int current_master_offset;
+        {
+            std::lock_guard<std::mutex> lock(offset_mutex);
+            current_master_offset = master_offset;
+        }
+        
+        int acked_replicas = 0;
+        while (true) {
+            {
+                std::lock_guard<std::mutex> lock(offset_mutex);
+                acked_replicas = 0;
+                for (const auto& replica_fd : connected_replicas) {
+                    auto it = replica_offsets.find(replica_fd);
+                    if (it != replica_offsets.end() && it->second >= current_master_offset) {
+                        acked_replicas++;
+                    }
+                }
+                if (acked_replicas >= numreplicas) {
+                    break;
+                }
+            }
+            
+            auto elapsed = std::chrono::steady_clock::now() - start_time;
+            if (elapsed >= timeout) {
+                break;
+            }
+            
+            // Send GETACK to all replicas to request their current offset
+            std::string getack_command = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
+            for (int replica_fd : connected_replicas) {
+                send(replica_fd, getack_command.c_str(), getack_command.length(), MSG_NOSIGNAL);
+            }
+            
+            // Sleep briefly to avoid busy-waiting
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        
+        std::string response = ":" + std::to_string(acked_replicas) + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
-        std::cout << "WAIT command received, returning " << num_replicas << " connected replicas" << std::endl;
+        std::cout << "WAIT command: Returning " << acked_replicas << " acknowledged replicas" << std::endl;
+    } catch (const std::exception& e) {
+        std::string response = "-ERR invalid arguments for WAIT\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    }
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
