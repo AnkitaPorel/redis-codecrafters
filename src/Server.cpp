@@ -912,6 +912,103 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             propagate_to_replicas(parsed_command);
         }
     }
+    } else if (command == "XRANGE" && parsed_command.size() == 4) {
+    std::string stream_key = parsed_command[1];
+    std::string start_id = parsed_command[2];
+    std::string end_id = parsed_command[3];
+    
+    // Check if stream exists
+    if (stream_store.find(stream_key) == stream_store.end()) {
+        send(client_fd, "*0\r\n", 4, 0); // Empty array
+        return;
+    }
+
+    const StreamData& stream = stream_store[stream_key];
+    std::vector<const StreamEntry*> matched_entries;
+
+    // Parse start and end IDs (handle missing sequence numbers)
+    long long start_ms = 0, start_seq = 0;
+    size_t dash_pos = start_id.find('-');
+    if (dash_pos != std::string::npos) {
+        try {
+            start_ms = std::stoll(start_id.substr(0, dash_pos));
+            if (dash_pos + 1 < start_id.length()) {
+                start_seq = std::stoll(start_id.substr(dash_pos + 1));
+            }
+        } catch (...) {
+            send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
+            return;
+        }
+    } else {
+        try {
+            start_ms = std::stoll(start_id);
+        } catch (...) {
+            send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
+            return;
+        }
+    }
+
+    long long end_ms = 0, end_seq = LLONG_MAX;
+    dash_pos = end_id.find('-');
+    if (dash_pos != std::string::npos) {
+        try {
+            end_ms = std::stoll(end_id.substr(0, dash_pos));
+            if (dash_pos + 1 < end_id.length()) {
+                end_seq = std::stoll(end_id.substr(dash_pos + 1));
+            }
+        } catch (...) {
+            send(client_fd, "-ERR Invalid end ID\r\n", 20, 0);
+            return;
+        }
+    } else {
+        try {
+            end_ms = std::stoll(end_id);
+        } catch (...) {
+            send(client_fd, "-ERR Invalid end ID\r\n", 20, 0);
+            return;
+        }
+    }
+
+    // Find matching entries
+    for (const auto& entry : stream.entries) {
+        long long entry_ms, entry_seq;
+        if (!parse_stream_id(entry.id, entry_ms, entry_seq)) {
+            continue;
+        }
+
+        if (entry_ms < start_ms || (entry_ms == start_ms && entry_seq < start_seq)) {
+            continue;
+        }
+
+        if (entry_ms > end_ms || (entry_ms == end_ms && entry_seq > end_seq)) {
+            continue;
+        }
+
+        matched_entries.push_back(&entry);
+    }
+
+    // Build RESP response
+    std::string response = "*" + std::to_string(matched_entries.size()) + "\r\n";
+    
+    for (const auto entry : matched_entries) {
+        // Entry ID and fields array
+        response += "*2\r\n";
+        
+        // Entry ID
+        response += "$" + std::to_string(entry->id.length()) + "\r\n";
+        response += entry->id + "\r\n";
+        
+        // Fields array
+        response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
+        for (const auto& field : entry->fields) {
+            response += "$" + std::to_string(field.first.length()) + "\r\n";
+            response += field.first + "\r\n";
+            response += "$" + std::to_string(field.second.length()) + "\r\n";
+            response += field.second + "\r\n";
+        }
+    }
+
+    send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
