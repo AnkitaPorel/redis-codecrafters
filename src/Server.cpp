@@ -206,7 +206,67 @@ void load_rdb_file() {
 }
 
 bool is_valid_stream_id(const std::string& id) {
-    return id.find('-') != std::string::npos;
+    size_t dash_pos = id.find('-');
+    if (dash_pos == std::string::npos || dash_pos == 0 || dash_pos == id.length() - 1) {
+        return false;
+    }
+    
+    // Check both parts are numeric
+    for (size_t i = 0; i < id.length(); i++) {
+        if (i != dash_pos && !isdigit(id[i])) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+bool parse_stream_id(const std::string& id, long long& ms, long long& seq) {
+    size_t dash_pos = id.find('-');
+    if (dash_pos == std::string::npos) {
+        return false;
+    }
+    
+    try {
+        ms = std::stoll(id.substr(0, dash_pos));
+        seq = std::stoll(id.substr(dash_pos + 1));
+    } catch (const std::exception& e) {
+        return false;
+    }
+    
+    return true;
+}
+
+bool is_valid_new_id(const std::string& new_id, const StreamData& stream) {
+    long long new_ms, new_seq;
+    if (!parse_stream_id(new_id, new_ms, new_seq)) {
+        return false;
+    }
+    
+    // Minimum ID check
+    if (new_ms < 0 || new_seq <= 0) {
+        return false;
+    }
+    
+    // For empty stream, just check it's greater than 0-0
+    if (stream.entries.empty()) {
+        return (new_ms > 0 || (new_ms == 0 && new_seq > 0));
+    }
+    
+    // Compare with last entry
+    const std::string& last_id = stream.entries.back().id;
+    long long last_ms, last_seq;
+    if (!parse_stream_id(last_id, last_ms, last_seq)) {
+        return false; // Shouldn't happen if existing entries are valid
+    }
+    
+    if (new_ms < last_ms) {
+        return false;
+    } else if (new_ms == last_ms) {
+        return new_seq > last_seq;
+    }
+    
+    return true;
 }
 
 void connect_to_master() {
@@ -696,8 +756,17 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::string stream_key = parsed_command[1];
     std::string entry_id = parsed_command[2];
     
+    // Check if ID is valid format
     if (!is_valid_stream_id(entry_id)) {
         std::string response = "-ERR Invalid stream ID specified\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+    
+    // Check if ID is greater than 0-0
+    long long ms, seq;
+    if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq <= 0) {
+        std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
@@ -705,6 +774,15 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     // Create stream if it doesn't exist
     if (stream_store.find(stream_key) == stream_store.end()) {
         stream_store[stream_key] = StreamData();
+    }
+
+    StreamData& stream = stream_store[stream_key];
+    
+    // Validate the new ID against the last entry
+    if (!is_valid_new_id(entry_id, stream)) {
+        std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
     }
 
     // Create new entry
@@ -715,7 +793,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 
     // Add entry to stream
-    stream_store[stream_key].entries.push_back(new_entry);
+    stream.entries.push_back(new_entry);
 
     // Return the entry ID as a bulk string
     std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
@@ -725,9 +803,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     if (connected_replicas.find(client_fd) == connected_replicas.end()) {
         propagate_to_replicas(parsed_command);
     }
-}
-
- else if (command == "TYPE" && parsed_command.size() == 2) {
+} else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
     
