@@ -47,6 +47,10 @@ std::set<int> connected_replicas;
 
 int replica_offset = 0;
 
+std::map<int, int> replica_offsets;
+std::mutex offset_mutex;
+int master_offset = 0;
+
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
 }
@@ -75,18 +79,27 @@ void propagate_to_replicas(const std::vector<std::string>& command) {
     }
     
     std::string resp_command = command_to_resp_array(command);
-    std::cout << "Propagating command to " << connected_replicas.size() << " replicas: " << resp_command;
+    int cmd_size = resp_command.size();
+    
+    {
+        std::lock_guard<std::mutex> lock(offset_mutex);
+        master_offset += cmd_size;
+    }
+    
+    std::cout << "Propagating command (" << cmd_size << " bytes) to " 
+              << connected_replicas.size() << " replicas" << std::endl;
     
     for (auto it = connected_replicas.begin(); it != connected_replicas.end();) {
         int replica_fd = *it;
         ssize_t bytes_sent = send(replica_fd, resp_command.c_str(), resp_command.length(), MSG_NOSIGNAL);
         
         if (bytes_sent < 0) {
-            std::cout << "Failed to send to replica (fd: " << replica_fd << "), removing from replica list" << std::endl;
+            std::lock_guard<std::mutex> lock(offset_mutex);
+            replica_offsets.erase(replica_fd);
             replica_info.erase(replica_fd);
             it = connected_replicas.erase(it);
+            std::cout << "Replica (fd: " << replica_fd << ") disconnected" << std::endl;
         } else {
-            std::cout << "Successfully sent command to replica (fd: " << replica_fd << ")" << std::endl;
             ++it;
         }
     }
@@ -509,6 +522,54 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         }
     } else if (command == "PING") {
         std::cout << "Replica: Received PING" << std::endl;
+    } else if (command == "WAIT" && parsed_command.size() == 3) {
+        try {
+            int num_replicas_requested = std::stoi(parsed_command[1]);
+            int timeout_ms = std::stoi(parsed_command[2]);
+        
+            if (num_replicas_requested < 0 || timeout_ms < 0) {
+                std::string response = "-ERR invalid arguments\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+        
+            int num_acknowledged = 0;
+            auto start_time = std::chrono::steady_clock::now();
+            auto timeout = std::chrono::milliseconds(timeout_ms);
+        
+            while (true) {
+                {
+                    std::lock_guard<std::mutex> lock(offset_mutex);
+                    num_acknowledged = 0;
+                
+                    for (const auto& pair : replica_offsets) {
+                        if (pair.second >= master_offset) {
+                            num_acknowledged++;
+                        }
+                    }
+                
+                    if (num_acknowledged >= num_replicas_requested || 
+                        connected_replicas.size() < num_replicas_requested) {
+                        break;
+                    }
+                }
+            
+                auto elapsed = std::chrono::steady_clock::now() - start_time;
+                if (elapsed >= timeout) {
+                    break;
+                }
+            
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        
+            std::string response = ":" + std::to_string(num_acknowledged) + "\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            std::cout << "WAIT: " << num_acknowledged << "/" << num_replicas_requested 
+                  << " replicas acknowledged" << std::endl;
+        } catch (const std::exception& e) {
+            std::string response = "-ERR invalid arguments\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
     }
     
     replica_offset += bytes_processed;
