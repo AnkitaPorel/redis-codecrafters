@@ -586,7 +586,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             std::lock_guard<std::mutex> wait_lock(wait_mutex);
             replica_ack_offsets[client_fd] = ack_offset;
             
-            // Check if this replica has processed all pending commands
             if (ack_offset >= pending_wait_offset && pending_wait_offset > 0) {
                 acked_replicas++;
                 std::cout << "Replica " << client_fd << " acknowledged. Total acked: " << acked_replicas.load() << std::endl;
@@ -650,7 +649,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         
         int current_connected = connected_replicas.size();
         
-        // If no replicas are connected, return 0 immediately
         if (current_connected == 0) {
             std::string response = ":0\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
@@ -775,7 +773,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send(client_fd, response.c_str(), response.length(), 0);
     }
     } else if (command == "XADD") {
-    // Minimum command: XADD key ID field value (5 args)
     if (parsed_command.size() < 5 || (parsed_command.size() - 3) % 2 != 0) {
         std::string response = "-ERR wrong number of arguments for XADD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -785,7 +782,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::string stream_key = parsed_command[1];
     std::string id_spec = parsed_command[2];
     
-    // Create stream if it doesn't exist
     if (stream_store.find(stream_key) == stream_store.end()) {
         stream_store[stream_key] = StreamData();
     }
@@ -795,11 +791,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     bool valid_id = false;
 
     if (id_spec == "*") {
-        // Case 1: Auto-generate both timestamp and sequence number ("*")
         long long ms = get_current_timestamp_ms();
         long long seq = 0;
 
-        // Find the highest sequence number for this timestamp
         if (!stream.entries.empty()) {
             for (const auto& entry : stream.entries) {
                 long long entry_ms, entry_seq;
@@ -815,7 +809,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         valid_id = true;
     }
     else if (id_spec.find('*') != std::string::npos) {
-        // Case 2: Auto-generate only sequence number ("timestamp-*")
         size_t dash_pos = id_spec.find('-');
         if (dash_pos == std::string::npos || dash_pos + 1 >= id_spec.length() || 
             id_spec.substr(dash_pos + 1) != "*") {
@@ -833,10 +826,8 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 return;
             }
 
-            // Generate sequence number
             long long seq = 0;
             if (!stream.entries.empty()) {
-                // Find the highest sequence number for this timestamp
                 long long max_seq = -1;
                 for (const auto& entry : stream.entries) {
                     long long entry_ms, entry_seq;
@@ -848,7 +839,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 }
                 seq = max_seq + 1;
             } else {
-                // Special case: if timestamp is 0, start sequence at 1
                 seq = (ms == 0) ? 1 : 0;
             }
 
@@ -861,7 +851,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
     else {
-        // Case 3: Explicit ID ("timestamp-seq")
         long long ms, seq;
         if (!parse_stream_id(id_spec, ms, seq)) {
             std::string response = "-ERR Invalid stream ID specified\r\n";
@@ -869,7 +858,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             return;
         }
 
-        // Validate the ID
         if (ms < 0 || seq <= 0) {
             std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
@@ -922,28 +910,34 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::vector<const StreamEntry*> matched_entries;
 
     long long start_ms = 0, start_seq = 0;
-    size_t dash_pos = start_id.find('-');
-    if (dash_pos != std::string::npos) {
-        try {
-            start_ms = std::stoll(start_id.substr(0, dash_pos));
-            if (dash_pos + 1 < start_id.length()) {
-                start_seq = std::stoll(start_id.substr(dash_pos + 1));
-            }
-        } catch (...) {
-            send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
-            return;
-        }
+    if (start_id == "-") {
+        // Special case: start from the beginning of the stream
+        start_ms = 0;
+        start_seq = 0;
     } else {
-        try {
-            start_ms = std::stoll(start_id);
-        } catch (...) {
-            send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
-            return;
+        size_t dash_pos = start_id.find('-');
+        if (dash_pos != std::string::npos) {
+            try {
+                start_ms = std::stoll(start_id.substr(0, dash_pos));
+                if (dash_pos + 1 < start_id.length()) {
+                    start_seq = std::stoll(start_id.substr(dash_pos + 1));
+                }
+            } catch (...) {
+                send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
+                return;
+            }
+        } else {
+            try {
+                start_ms = std::stoll(start_id);
+            } catch (...) {
+                send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
+                return;
+            }
         }
     }
 
     long long end_ms = 0, end_seq = LLONG_MAX;
-    dash_pos = end_id.find('-');
+    size_t dash_pos = end_id.find('-');
     if (dash_pos != std::string::npos) {
         try {
             end_ms = std::stoll(end_id.substr(0, dash_pos));
@@ -1306,7 +1300,6 @@ void handle_master_connection() {
                 size_t command_start = pos;
                 std::vector<std::string> parsed_command;
 
-                // Parse array length
                 size_t crlf_pos = command_buffer.find("\r\n", pos);
                 if (crlf_pos == std::string::npos) {
                     break;
