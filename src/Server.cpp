@@ -524,11 +524,109 @@ void handle_master_connection() {
         return;
     }
     
-    replica_offset = 0;  // Initialize offset to 0 at start
+    replica_offset = 0;
 
-    // ... [previous handshake code until PSYNC] ...
+    std::cout << "Connecting to master at " << master_host << ":" << master_port << std::endl;
+    
+    int master_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (master_fd < 0) {
+        std::cerr << "Failed to create socket for master connection" << std::endl;
+        return;
+    }
+    
+    struct sockaddr_in master_addr;
+    memset(&master_addr, 0, sizeof(master_addr));
+    master_addr.sin_family = AF_INET;
+    master_addr.sin_port = htons(master_port);
+    
+    if (master_host == "localhost") {
+        master_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    } else if (inet_aton(master_host.c_str(), &master_addr.sin_addr) == 0) {
+        struct hostent *host_entry = gethostbyname(master_host.c_str());
+        if (host_entry == nullptr) {
+            std::cerr << "Failed to resolve master hostname: " << master_host << std::endl;
+            close(master_fd);
+            return;
+        }
+        memcpy(&master_addr.sin_addr, host_entry->h_addr_list[0], host_entry->h_length);
+    }
+    
+    if (connect(master_fd, (struct sockaddr*)&master_addr, sizeof(master_addr)) < 0) {
+        std::cerr << "Failed to connect to master at " << master_host << ":" << master_port << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Connected to master successfully" << std::endl;
+    
+    std::string ping_command = "*1\r\n$4\r\nPING\r\n";
+    if (send(master_fd, ping_command.c_str(), ping_command.length(), 0) < 0) {
+        std::cerr << "Failed to send PING to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent PING to master" << std::endl;
 
     std::cout << "Sent PSYNC ? -1 to master" << std::endl;
+    
+    char response_buffer[4096];
+    int bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive PONG from master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response from master: " << response_buffer << std::endl;
+    
+    std::string port_str = std::to_string(server_port);
+    std::string replconf_port_command = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + 
+                                       std::to_string(port_str.length()) + "\r\n" + port_str + "\r\n";
+    
+    if (send(master_fd, replconf_port_command.c_str(), replconf_port_command.length(), 0) < 0) {
+        std::cerr << "Failed to send REPLCONF listening-port to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent REPLCONF listening-port " << server_port << " to master" << std::endl;
+    
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive OK from master for REPLCONF listening-port" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response to REPLCONF listening-port: " << response_buffer << std::endl;
+    
+    std::string replconf_capa_command = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+    
+    if (send(master_fd, replconf_capa_command.c_str(), replconf_capa_command.length(), 0) < 0) {
+        std::cerr << "Failed to send REPLCONF capa psync2 to master" << std::endl;
+        close(master_fd);
+        return;
+    }
+    
+    std::cout << "Sent REPLCONF capa psync2 to master" << std::endl;
+    
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    if (bytes_received <= 0) {
+        std::cerr << "Failed to receive OK from master for REPLCONF capa" << std::endl;
+        close(master_fd);
+        return;
+    }
+    response_buffer[bytes_received] = '\0';
+    std::cout << "Received response to REPLCONF capa: " << response_buffer << std::endl;
+    
+    std::string psync_command = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+    
+    if (send(master_fd, psync_command.c_str(), psync_command.length(), 0) < 0) {
+        std::cerr << "Failed to send PSYNC to master" << std::endl;
+        close(master_fd);
+        return;
+    }
     
     char response_buffer[4096];
     int bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
@@ -677,7 +775,7 @@ void handle_master_connection() {
             command_buffer = command_buffer.substr(pos);
         }
     }
-    
+
     close(master_fd);
 }
 
