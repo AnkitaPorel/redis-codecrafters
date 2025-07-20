@@ -531,27 +531,8 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         int num_replicas_expected = std::stoi(parsed_command[1]);
         int timeout_ms = std::stoi(parsed_command[2]);
         
-        std::cout << "WAIT command: expecting " << num_replicas_expected 
-                  << " replicas, timeout " << timeout_ms << "ms" << std::endl;
-        
-        int current_connected = connected_replicas.size();
-        
-        // If no replicas are connected, return 0 immediately
-        if (current_connected == 0) {
-            std::string response = ":0\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            std::cout << "No replicas connected, returning 0" << std::endl;
-            return;
-        }
-        
-        // If no write commands have been sent (master_offset is 0), return current replica count
-        if (master_offset == 0) {
-            std::string response = ":" + std::to_string(current_connected) + "\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            std::cout << "No writes to replicate, returning " << current_connected << std::endl;
-            return;
-        }
-        
+        // ... [initial checks] ...
+
         // Reset counters and set expectations
         {
             std::lock_guard<std::mutex> wait_lock(wait_mutex);
@@ -559,7 +540,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             expected_replicas = num_replicas_expected;
             acked_replicas = 0;
             
-            // Initialize ack offsets for all connected replicas if not already done
+            // Initialize ack offsets
             for (int replica_fd : connected_replicas) {
                 if (replica_ack_offsets.find(replica_fd) == replica_ack_offsets.end()) {
                     replica_ack_offsets[replica_fd] = 0;
@@ -567,39 +548,65 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
         }
         
-        // Send GETACK to all replicas
         send_getack_to_replicas();
         
-        // Wait for acknowledgments or timeout
+        // Non-blocking wait with periodic checks
+        int final_acked = 0;
         auto start_time = std::chrono::steady_clock::now();
         auto timeout_time = start_time + std::chrono::milliseconds(timeout_ms);
         
-        int final_acked = 0;
-        bool timed_out = false;
-        
         while (true) {
-            std::unique_lock<std::mutex> wait_lock(wait_mutex);
-            final_acked = acked_replicas.load();
+            // Check current ACK count
+            {
+                std::lock_guard<std::mutex> lock(wait_mutex);
+                final_acked = acked_replicas;
+            }
             
             if (final_acked >= num_replicas_expected) {
+                std::cout << "WAIT completed: " << final_acked << std::endl;
                 break;
             }
             
-            if (wait_cv.wait_until(wait_lock, timeout_time) == std::cv_status::timeout) {
-                timed_out = true;
+            if (std::chrono::steady_clock::now() >= timeout_time) {
+                std::cout << "WAIT timed out: " << final_acked << std::endl;
                 break;
             }
-        }
-        
-        if (timed_out) {
-            std::cout << "WAIT timed out: " << final_acked << " replicas acknowledged" << std::endl;
-        } else {
-            std::cout << "WAIT completed: " << final_acked << " replicas acknowledged within timeout" << std::endl;
+            
+            // Process network events while waiting
+            struct timeval tv {
+                .tv_sec = 0,
+                .tv_usec = 10000  // 10ms
+            };
+            
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            int max_fd = -1;
+            
+            // Add replica sockets
+            for (int fd : connected_replicas) {
+                FD_SET(fd, &read_fds);
+                if (fd > max_fd) max_fd = fd;
+            }
+            
+            select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
+            
+            // Process incoming data from replicas
+            for (int fd : connected_replicas) {
+                if (FD_ISSET(fd, &read_fds)) {
+                    char buffer[4096];
+                    int bytes = recv(fd, buffer, sizeof(buffer), 0);
+                    if (bytes > 0) {
+                        std::vector<std::string> cmd;
+                        parse_redis_command(std::string(buffer, bytes), cmd);
+                        execute_redis_command(fd, cmd);
+                    }
+                }
+            }
         }
         
         std::string response = ":" + std::to_string(final_acked) + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
-        
+    } 
     } catch (const std::exception& e) {
         std::cerr << "Invalid WAIT command arguments" << std::endl;
         std::string response = "-ERR invalid arguments\r\n";
