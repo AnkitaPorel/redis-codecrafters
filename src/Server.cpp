@@ -206,8 +206,10 @@ void load_rdb_file() {
 }
 
 bool is_valid_stream_id(const std::string& id) {
+    std::cout << "Validating stream ID: " << id << std::endl;
     size_t dash_pos = id.find('-');
     if (dash_pos == std::string::npos) {
+        std::cout << "No dash found in ID" << std::endl;
         return false;
     }
     
@@ -215,21 +217,25 @@ bool is_valid_stream_id(const std::string& id) {
     std::string sequence_str = id.substr(dash_pos + 1);
     
     if (timestamp_str.empty() || sequence_str.empty()) {
+        std::cout << "Empty timestamp or sequence" << std::endl;
         return false;
     }
     
     for (char c : timestamp_str) {
         if (!std::isdigit(c)) {
+            std::cout << "Non-digit in timestamp" << std::endl;
             return false;
         }
     }
     
     for (char c : sequence_str) {
         if (!std::isdigit(c)) {
+            std::cout << "Non-digit in sequence" << std::endl;
             return false;
         }
     }
     
+    std::cout << "Stream ID is valid" << std::endl;
     return true;
 }
 
@@ -707,21 +713,30 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send(client_fd, response.c_str(), response.length(), 0);
     }
     } else if (command == "XADD" && parsed_command.size() >= 4 && (parsed_command.size() % 2 == 0)) {
+    std::cout << "Processing XADD command with " << parsed_command.size() << " arguments" << std::endl;
+    for (const auto& arg : parsed_command) {
+        std::cout << "  Arg: " << arg << std::endl;
+    }
+
     std::string stream_key = parsed_command[1];
     std::string entry_id = parsed_command[2];
     
+    std::cout << "Validating stream ID: " << entry_id << std::endl;
     if (!is_valid_stream_id(entry_id)) {
+        std::cerr << "Invalid stream ID: " << entry_id << std::endl;
         std::string response = "-ERR Invalid stream ID specified as stream command argument\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
     
     if ((parsed_command.size() - 3) % 2 != 0) {
+        std::cerr << "Wrong number of arguments for XADD" << std::endl;
         std::string response = "-ERR wrong number of arguments for XADD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
     
+    std::cout << "Creating/accessing stream: " << stream_key << std::endl;
     if (stream_store.find(stream_key) == stream_store.end()) {
         stream_store[stream_key] = StreamData();
     }
@@ -731,18 +746,20 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     for (size_t i = 3; i < parsed_command.size(); i += 2) {
         std::string field = parsed_command[i];
         std::string value = parsed_command[i + 1];
+        std::cout << "Adding field-value pair: " << field << " = " << value << std::endl;
         new_entry.fields[field] = value;
     }
     
     stream_store[stream_key].entries.push_back(new_entry);
     
     std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
+    std::cout << "Sending response: " << response << std::endl;
     send(client_fd, response.c_str(), response.length(), 0);
     
     if (connected_replicas.find(client_fd) == connected_replicas.end()) {
         propagate_to_replicas(parsed_command);
     }
-    } else if (command == "TYPE" && parsed_command.size() == 2) {
+} else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
     
