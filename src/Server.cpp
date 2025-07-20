@@ -43,21 +43,20 @@ std::string master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 int master_repl_offset = 0;
 
 std::map<int, std::map<std::string, std::string>> replica_info;
-// Track which client connections are replicas (completed handshake)
 std::set<int> connected_replicas;
+
+int replica_offset = 0;
 
 std::chrono::steady_clock::time_point get_current_time() {
     return std::chrono::steady_clock::now();
 }
 
-// Helper function to check if a command is a write command that should be propagated
 bool is_write_command(const std::string& command) {
     return (command == "SET" || command == "DEL" || command == "INCR" || command == "DECR" || 
             command == "LPUSH" || command == "RPUSH" || command == "LPOP" || command == "RPOP" ||
             command == "SADD" || command == "SREM" || command == "HSET" || command == "HDEL");
 }
 
-// Helper function to convert command back to RESP array format
 std::string command_to_resp_array(const std::vector<std::string>& command) {
     std::string resp = "*" + std::to_string(command.size()) + "\r\n";
     for (const std::string& arg : command) {
@@ -66,14 +65,13 @@ std::string command_to_resp_array(const std::vector<std::string>& command) {
     return resp;
 }
 
-// Function to propagate write commands to all connected replicas
 void propagate_to_replicas(const std::vector<std::string>& command) {
     if (is_replica || connected_replicas.empty()) {
-        return; // Don't propagate if we're a replica or have no replicas
+        return;
     }
     
     if (!is_write_command(command[0])) {
-        return; // Only propagate write commands
+        return;
     }
     
     std::string resp_command = command_to_resp_array(command);
@@ -452,7 +450,10 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 }
 
-std::string execute_replica_command(const std::vector<std::string>& parsed_command) {
+std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
+    // Update the replica offset with the bytes from this command
+    replica_offset += bytes_processed;
+    
     if (parsed_command.empty()) {
         return "";
     }
@@ -467,8 +468,14 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         }
         
         if (subcommand == "GETACK") {
-            std::string response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n";
-            std::cout << "Replica: Responding to GETACK with ACK 0" << std::endl;
+            // Return the current offset BEFORE processing this GETACK command
+            // We need to subtract the bytes for this GETACK command since the offset
+            // should reflect bytes processed BEFORE receiving this command
+            int offset_to_report = replica_offset - bytes_processed;
+            std::string offset_str = std::to_string(offset_to_report);
+            std::string response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
+                                 std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
+            std::cout << "Replica: Responding to GETACK with ACK " << offset_to_report << std::endl;
             return response;
         }
     } else if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
@@ -656,20 +663,7 @@ void handle_master_connection() {
     
     std::string command_buffer;
     
-    while (true) {
-        bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
-        if (bytes_received <= 0) {
-            std::cerr << "Lost connection to master" << std::endl;
-            break;
-        }
-        
-        response_buffer[bytes_received] = '\0';
-        command_buffer.append(response_buffer, bytes_received);
-        
-        std::cout << "Received data from master: " << std::string(response_buffer, bytes_received) << std::endl;
-        
-        // Parse and process complete commands from the buffer
-        size_t pos = 0;
+    size_t pos = 0;
         while (pos < command_buffer.length()) {
             // Look for start of RESP array
             size_t array_start = command_buffer.find('*', pos);
@@ -681,30 +675,63 @@ void handle_master_connection() {
             try {
                 // Try to parse a complete command starting at array_start
                 std::vector<std::string> parsed_command;
-                size_t command_end_pos = array_start;
-                
-                // Parse the command using redis_parser
                 std::string command_str = command_buffer.substr(array_start);
-                parse_redis_command(command_str, parsed_command);
                 
-                // Calculate how much we consumed by finding where the parsed command ends
-                // This is a bit tricky - we need to reconstruct the command length
-                if (!parsed_command.empty()) {
-                    // Find the end of this command by looking for the next '*' or end of buffer
-                    size_t next_array = command_buffer.find('*', array_start + 1);
-                    if (next_array != std::string::npos) {
-                        command_end_pos = next_array;
-                    } else {
-                        command_end_pos = command_buffer.length();
+                // We need to find the exact end of this command to calculate bytes
+                size_t command_start_pos = array_start;
+                size_t command_end_pos = command_start_pos;
+                
+                // Parse the RESP array to find its exact boundaries
+                if (command_str[0] == '*') {
+                    size_t crlf_pos = command_str.find("\r\n");
+                    if (crlf_pos == std::string::npos) {
+                        break; // Incomplete command
                     }
                     
-                    std::cout << "Received propagated command from master: ";
+                    int num_elements = std::stoi(command_str.substr(1, crlf_pos - 1));
+                    size_t parse_pos = crlf_pos + 2;
+                    
+                    bool complete_command = true;
+                    for (int i = 0; i < num_elements; i++) {
+                        if (parse_pos >= command_str.length() || command_str[parse_pos] != '$') {
+                            complete_command = false;
+                            break;
+                        }
+                        
+                        size_t len_crlf = command_str.find("\r\n", parse_pos);
+                        if (len_crlf == std::string::npos) {
+                            complete_command = false;
+                            break;
+                        }
+                        
+                        int str_len = std::stoi(command_str.substr(parse_pos + 1, len_crlf - parse_pos - 1));
+                        parse_pos = len_crlf + 2;
+                        
+                        if (parse_pos + str_len + 2 > command_str.length()) {
+                            complete_command = false;
+                            break;
+                        }
+                        
+                        parsed_command.push_back(command_str.substr(parse_pos, str_len));
+                        parse_pos += str_len + 2; // Skip the string and \r\n
+                    }
+                    
+                    if (!complete_command) {
+                        break; // Wait for more data
+                    }
+                    
+                    command_end_pos = command_start_pos + parse_pos;
+                    
+                    // Calculate the exact number of bytes for this command
+                    int command_bytes = command_end_pos - command_start_pos;
+                    
+                    std::cout << "Received propagated command from master (" << command_bytes << " bytes): ";
                     for (const auto& arg : parsed_command) {
                         std::cout << "'" << arg << "' ";
                     }
                     std::cout << std::endl;
                     
-                    std::string response = execute_replica_command(parsed_command);
+                    std::string response = execute_replica_command(parsed_command, command_bytes);
                     
                     if (!response.empty()) {
                         std::cout << "Sending response to master: " << response;
@@ -724,11 +751,10 @@ void handle_master_connection() {
                 pos = array_start + 1;
             }
         }
-        
+
         if (pos > 0) {
             command_buffer = command_buffer.substr(pos);
         }
-    }
     
     close(master_fd);
 }
