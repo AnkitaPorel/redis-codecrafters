@@ -713,49 +713,44 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send(client_fd, response.c_str(), response.length(), 0);
     }
     } else if (command == "XADD" && parsed_command.size() >= 4 && (parsed_command.size() % 2 == 0)) {
-    std::cout << "Processing XADD command with " << parsed_command.size() << " arguments" << std::endl;
-    for (const auto& arg : parsed_command) {
-        std::cout << "  Arg: " << arg << std::endl;
-    }
-
     std::string stream_key = parsed_command[1];
     std::string entry_id = parsed_command[2];
     
-    std::cout << "Validating stream ID: " << entry_id << std::endl;
+    // Validate stream ID
     if (!is_valid_stream_id(entry_id)) {
-        std::cerr << "Invalid stream ID: " << entry_id << std::endl;
-        std::string response = "-ERR Invalid stream ID specified as stream command argument\r\n";
+        std::string response = "-ERR Invalid stream ID format\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
     
-    if ((parsed_command.size() - 3) % 2 != 0) {
-        std::cerr << "Wrong number of arguments for XADD" << std::endl;
-        std::string response = "-ERR wrong number of arguments for XADD\r\n";
+    // Validate that we have key-value pairs (at least one pair)
+    if ((parsed_command.size() - 3) % 2 != 0 || parsed_command.size() < 4) {
+        std::string response = "-ERR wrong number of arguments for XADD command\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
     
-    std::cout << "Creating/accessing stream: " << stream_key << std::endl;
+    // Create or access stream
     if (stream_store.find(stream_key) == stream_store.end()) {
         stream_store[stream_key] = StreamData();
     }
     
+    // Create new stream entry
     StreamEntry new_entry(entry_id);
-    
     for (size_t i = 3; i < parsed_command.size(); i += 2) {
         std::string field = parsed_command[i];
         std::string value = parsed_command[i + 1];
-        std::cout << "Adding field-value pair: " << field << " = " << value << std::endl;
         new_entry.fields[field] = value;
     }
     
+    // Add entry to stream
     stream_store[stream_key].entries.push_back(new_entry);
     
+    // Send the entry ID as a RESP bulk string
     std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
-    std::cout << "Sending response: " << response << std::endl;
     send(client_fd, response.c_str(), response.length(), 0);
     
+    // Propagate to replicas if not a replica and not from a replica
     if (connected_replicas.find(client_fd) == connected_replicas.end()) {
         propagate_to_replicas(parsed_command);
     }
