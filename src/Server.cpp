@@ -436,7 +436,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             std::cout << "Sending RDB file data (" << rdb_data.size() << " bytes)" << std::endl;
             send(client_fd, rdb_data.data(), rdb_data.size(), 0);
             
-            // Mark this connection as a replica that has completed handshake
             connected_replicas.insert(client_fd);
             std::cout << "Replica (fd: " << client_fd << ") handshake completed. Now tracking for command propagation." << std::endl;
             
@@ -451,9 +450,13 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 }
 
 std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
-    // Update the replica offset with the bytes from this command
     replica_offset += bytes_processed;
     
+    int offset_to_report = replica_offset - bytes_processed;
+    std::string offset_str = std::to_string(offset_to_report);
+    std::string ack_response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
+                               std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
+
     if (parsed_command.empty()) {
         return "";
     }
@@ -468,15 +471,8 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         }
         
         if (subcommand == "GETACK") {
-            // Return the current offset BEFORE processing this GETACK command
-            // We need to subtract the bytes for this GETACK command since the offset
-            // should reflect bytes processed BEFORE receiving this command
-            int offset_to_report = replica_offset - bytes_processed;
-            std::string offset_str = std::to_string(offset_to_report);
-            std::string response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
-                                 std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
             std::cout << "Replica: Responding to GETACK with ACK " << offset_to_report << std::endl;
-            return response;
+            return ack_response;
         }
     } else if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
         std::string key = parsed_command[1];
@@ -513,7 +509,8 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         std::cout << "Replica: Received PING (no response sent)" << std::endl;
     }
     
-    return "";
+    std::cout << "Replica: Sending ACK " << offset_to_report << " for command: " << command << std::endl;
+    return ack_response;
 }
 
 void handle_master_connection() {
@@ -733,12 +730,11 @@ void handle_master_connection() {
                     }
                     
                     if (!complete_command) {
-                        break; // Wait for more data
+                        break;
                     }
                     
                     command_end_pos = command_start_pos + parse_pos;
                     
-                    // Calculate the exact number of bytes for this command
                     int command_bytes = command_end_pos - command_start_pos;
                     
                     std::cout << "Received propagated command from master (" << command_bytes << " bytes): ";
@@ -769,7 +765,6 @@ void handle_master_connection() {
             }
         }
 
-        // Remove processed commands from buffer
         if (pos > 0) {
             command_buffer = command_buffer.substr(pos);
         }
