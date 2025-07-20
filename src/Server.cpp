@@ -452,8 +452,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 }
 
-// Replace the execute_replica_command function with this corrected version:
-
 std::string execute_replica_command(const std::vector<std::string>& parsed_command) {
     if (parsed_command.empty()) {
         return "";
@@ -464,13 +462,11 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
     if (command == "REPLCONF" && parsed_command.size() >= 2) {
         std::string subcommand = parsed_command[1];
         
-        // Convert to uppercase for comparison
         for (char& c : subcommand) {
             c = std::toupper(c);
         }
         
         if (subcommand == "GETACK") {
-            // Return REPLCONF ACK 0 response
             std::string response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n";
             std::cout << "Replica: Responding to GETACK with ACK 0" << std::endl;
             return response;
@@ -512,90 +508,6 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
     
     return "";
 }
-
-// Replace the command parsing loop in handle_master_connection() with this improved version:
-
-// This replaces the while(true) loop in handle_master_connection() starting from "Now listening for propagated commands..."
-    std::cout << "Handshake completed successfully. Now listening for propagated commands..." << std::endl;
-    
-    std::string command_buffer;
-    
-    while (true) {
-        bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
-        if (bytes_received <= 0) {
-            std::cerr << "Lost connection to master" << std::endl;
-            break;
-        }
-        
-        response_buffer[bytes_received] = '\0';
-        command_buffer.append(response_buffer, bytes_received);
-        
-        std::cout << "Received data from master: " << std::string(response_buffer, bytes_received) << std::endl;
-        
-        // Parse and process complete commands from the buffer
-        size_t pos = 0;
-        while (pos < command_buffer.length()) {
-            // Look for start of RESP array
-            size_t array_start = command_buffer.find('*', pos);
-            if (array_start == std::string::npos) {
-                // No complete command found, break and wait for more data
-                break;
-            }
-            
-            try {
-                // Try to parse a complete command starting at array_start
-                std::vector<std::string> parsed_command;
-                size_t command_end_pos = array_start;
-                
-                // Parse the command using redis_parser
-                std::string command_str = command_buffer.substr(array_start);
-                parse_redis_command(command_str, parsed_command);
-                
-                // Calculate how much we consumed by finding where the parsed command ends
-                // This is a bit tricky - we need to reconstruct the command length
-                if (!parsed_command.empty()) {
-                    // Find the end of this command by looking for the next '*' or end of buffer
-                    size_t next_array = command_buffer.find('*', array_start + 1);
-                    if (next_array != std::string::npos) {
-                        command_end_pos = next_array;
-                    } else {
-                        command_end_pos = command_buffer.length();
-                    }
-                    
-                    std::cout << "Received propagated command from master: ";
-                    for (const auto& arg : parsed_command) {
-                        std::cout << "'" << arg << "' ";
-                    }
-                    std::cout << std::endl;
-                    
-                    std::string response = execute_replica_command(parsed_command);
-                    
-                    if (!response.empty()) {
-                        std::cout << "Sending response to master: " << response;
-                        if (send(master_fd, response.c_str(), response.length(), 0) < 0) {
-                            std::cerr << "Failed to send response to master" << std::endl;
-                            break;
-                        }
-                    }
-                    
-                    pos = command_end_pos;
-                } else {
-                    // Couldn't parse, move past this '*'
-                    pos = array_start + 1;
-                }
-                
-            } catch (const std::exception& e) {
-                std::cout << "Parse error: " << e.what() << ", trying next position" << std::endl;
-                // Move to next potential command start
-                pos = array_start + 1;
-            }
-        }
-        
-        // Remove processed commands from buffer
-        if (pos > 0) {
-            command_buffer = command_buffer.substr(pos);
-        }
-    }
 
 void handle_master_connection() {
     if (!is_replica) {
@@ -754,51 +666,62 @@ void handle_master_connection() {
         response_buffer[bytes_received] = '\0';
         command_buffer.append(response_buffer, bytes_received);
         
+        std::cout << "Received data from master: " << std::string(response_buffer, bytes_received) << std::endl;
+        
+        // Parse and process complete commands from the buffer
         size_t pos = 0;
         while (pos < command_buffer.length()) {
-            size_t command_start = command_buffer.find('*', pos);
-            if (command_start == std::string::npos) {
+            // Look for start of RESP array
+            size_t array_start = command_buffer.find('*', pos);
+            if (array_start == std::string::npos) {
+                // No complete command found, break and wait for more data
                 break;
             }
             
-            size_t search_pos = command_start;
-            size_t next_command_start = command_buffer.find('*', search_pos + 1);
-            
-            std::string potential_command;
-            if (next_command_start != std::string::npos) {
-                potential_command = command_buffer.substr(command_start, next_command_start - command_start);
-            } else {
-                potential_command = command_buffer.substr(command_start);
-            }
-            
             try {
+                // Try to parse a complete command starting at array_start
                 std::vector<std::string> parsed_command;
-                parse_redis_command(potential_command, parsed_command);
+                size_t command_end_pos = array_start;
                 
-                std::cout << "Received propagated command from master: ";
-                for (const auto& arg : parsed_command) {
-                    std::cout << "'" << arg << "' ";
-                }
-                std::cout << std::endl;
+                // Parse the command using redis_parser
+                std::string command_str = command_buffer.substr(array_start);
+                parse_redis_command(command_str, parsed_command);
                 
-                std::string response = execute_replica_command(parsed_command);
-                
-                if (!response.empty()) {
-                    std::cout << "Sending response to master: " << response;
-                    if (send(master_fd, response.c_str(), response.length(), 0) < 0) {
-                        std::cerr << "Failed to send response to master" << std::endl;
-                        break;
+                // Calculate how much we consumed by finding where the parsed command ends
+                // This is a bit tricky - we need to reconstruct the command length
+                if (!parsed_command.empty()) {
+                    // Find the end of this command by looking for the next '*' or end of buffer
+                    size_t next_array = command_buffer.find('*', array_start + 1);
+                    if (next_array != std::string::npos) {
+                        command_end_pos = next_array;
+                    } else {
+                        command_end_pos = command_buffer.length();
                     }
+                    
+                    std::cout << "Received propagated command from master: ";
+                    for (const auto& arg : parsed_command) {
+                        std::cout << "'" << arg << "' ";
+                    }
+                    std::cout << std::endl;
+                    
+                    std::string response = execute_replica_command(parsed_command);
+                    
+                    if (!response.empty()) {
+                        std::cout << "Sending response to master: " << response;
+                        if (send(master_fd, response.c_str(), response.length(), 0) < 0) {
+                            std::cerr << "Failed to send response to master" << std::endl;
+                            break;
+                        }
+                    }
+                    
+                    pos = command_end_pos;
+                } else {
+                    pos = array_start + 1;
                 }
-                
-                pos = command_start + potential_command.length();
                 
             } catch (const std::exception& e) {
-                if (next_command_start != std::string::npos) {
-                    pos = next_command_start;
-                } else {
-                    break;
-                }
+                std::cout << "Parse error: " << e.what() << ", trying next position" << std::endl;
+                pos = array_start + 1;
             }
         }
         
