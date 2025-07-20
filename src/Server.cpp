@@ -450,14 +450,11 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 }
 
 std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
-    // Calculate offset to report BEFORE updating with current command's bytes
-    int offset_to_report = replica_offset;
-    
     // Update the replica offset with the bytes from this command
     replica_offset += bytes_processed;
     
-    // Prepare ACK response with the offset BEFORE processing this command
-    std::string offset_str = std::to_string(offset_to_report);
+    // Prepare ACK response with the offset AFTER processing this command
+    std::string offset_str = std::to_string(replica_offset);
     std::string ack_response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
                                std::to_string(offset_str.length()) + "\r\n" + offset_str + "\r\n";
 
@@ -475,7 +472,7 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         }
         
         if (subcommand == "GETACK") {
-            std::cout << "Replica: Responding to GETACK with ACK " << offset_to_report << std::endl;
+            std::cout << "Replica: Responding to GETACK with ACK " << replica_offset << std::endl;
             return ack_response;
         }
     } else if (command == "SET" && (parsed_command.size() == 3 || parsed_command.size() == 5)) {
@@ -510,11 +507,11 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
             std::cout << "Replica: DEL '" << key << "'" << std::endl;
         }
     } else if (command == "PING") {
-        std::cout << "Replica: Received PING (no response sent)" << std::endl;
+        std::cout << "Replica: Received PING" << std::endl;
     }
     
     // Return ACK for all processed commands
-    std::cout << "Replica: Sending ACK " << offset_to_report << " for command: " << command << std::endl;
+    std::cout << "Replica: Sending ACK " << replica_offset << " for command: " << command << std::endl;
     return ack_response;
 }
 
