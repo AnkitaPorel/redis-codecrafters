@@ -16,6 +16,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <future>
+#include <fcntl.h>
 #include <atomic>
 #include <signal.h>
 
@@ -822,8 +823,21 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::string stream_key = parsed_command[1];
     std::string entry_id = parsed_command[2];
     
-    // ... (existing XADD logic to create and add the new entry)
-    
+    if (stream_store.find(stream_key) == stream_store.end()) {
+        stream_store[stream_key] = StreamData();
+    }
+
+    StreamEntry new_entry(entry_id);
+    for (size_t i = 3; i < parsed_command.size(); i += 2) {
+        if (i + 1 >= parsed_command.size()) break;
+        new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
+    }
+
+    stream_store[stream_key].entries.push_back(new_entry);
+
+    std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
+    send(client_fd, response.c_str(), response.length(), 0);
+
     // Notify blocked clients
     std::vector<BlockedClient> to_unblock;
     {
@@ -861,7 +875,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send(client.fd, response.c_str(), response.length(), 0);
     }
     
-    // ... (rest of existing XADD logic)
+    if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+        propagate_to_replicas(parsed_command);
+    }
     } else if (command == "XRANGE" && parsed_command.size() == 4) {
     std::string stream_key = parsed_command[1];
     std::string start_id = parsed_command[2];
