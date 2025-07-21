@@ -568,18 +568,36 @@ if (!stream_store[stream_key].entries.empty()) {
     std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
     send(client_fd, response.c_str(), response.length(), 0);
 
-    // Notify blocked clients
     std::vector<BlockedClient> to_unblock;
     {
         std::lock_guard<std::mutex> lock(blocked_clients_mutex);
+        std::cout << "XADD: Added entry " << entry_id << " to stream " << stream_key << std::endl;
+        std::cout << "XADD: Checking " << blocked_clients.size() << " blocked clients" << std::endl;
+        
         for (auto it = blocked_clients.begin(); it != blocked_clients.end();) {
+            std::cout << "XADD: Blocked client fd=" << it->fd 
+                      << " on stream '" << it->stream_key 
+                      << "' with last_id '" << it->last_id << "'" << std::endl;
+                      
             if (it->stream_key == stream_key) {
+                std::cout << "XADD: Stream key matches!" << std::endl;
                 long long entry_ms, entry_seq;
                 long long last_ms, last_seq;
-                if (parse_stream_id(entry_id, entry_ms, entry_seq) &&
-                    parse_stream_id(it->last_id, last_ms, last_seq)) {
-                    // New entry should be greater than the last_id the client saw
-                    if (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq)) {
+                
+                bool entry_parsed = parse_stream_id(entry_id, entry_ms, entry_seq);
+                bool last_parsed = parse_stream_id(it->last_id, last_ms, last_seq);
+                
+                std::cout << "XADD: entry_id=" << entry_id << " parsed=" << entry_parsed 
+                          << " (ms=" << entry_ms << ", seq=" << entry_seq << ")" << std::endl;
+                std::cout << "XADD: last_id=" << it->last_id << " parsed=" << last_parsed 
+                          << " (ms=" << last_ms << ", seq=" << last_seq << ")" << std::endl;
+                
+                if (entry_parsed && last_parsed) {
+                    bool should_unblock = (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq));
+                    std::cout << "XADD: should_unblock=" << should_unblock << std::endl;
+                    
+                    if (should_unblock) {
+                        std::cout << "XADD: Adding client to unblock list" << std::endl;
                         to_unblock.push_back(*it);
                         it = blocked_clients.erase(it);
                         continue;
@@ -590,9 +608,10 @@ if (!stream_store[stream_key].entries.empty()) {
         }
     }
 
+    std::cout << "XADD: Will unblock " << to_unblock.size() << " clients" << std::endl;
+
     // Respond to unblocked clients
     for (const auto& client : to_unblock) {
-        // Format: *1\r\n*2\r\n$stream_key_len\r\nstream_key\r\n*1\r\n*2\r\nentry_id\r\nfields...
         std::string unblock_response = "*1\r\n*2\r\n";
         unblock_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
         unblock_response += "*1\r\n*2\r\n";
@@ -602,9 +621,10 @@ if (!stream_store[stream_key].entries.empty()) {
             unblock_response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
             unblock_response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
         }
-        send(client.fd, unblock_response.c_str(), unblock_response.length(), 0);
         
-        std::cout << "Unblocked client fd: " << client.fd << " with entry: " << entry_id << std::endl;
+        std::cout << "XADD: Sending unblock response to fd=" << client.fd 
+                  << ": " << unblock_response << std::endl;
+        send(client.fd, unblock_response.c_str(), unblock_response.length(), 0);
     }
 
     // Propagate to replicas if this isn't a replica connection
