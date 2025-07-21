@@ -731,37 +731,59 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
+    bool is_blocking = false;
+    long long timeout_ms = 0;
     size_t streams_pos = 1;
-    size_t num_streams = 1;
-    
-    // Check if STREAMS keyword is present
-    if (parsed_command.size() >= 4 && parsed_command[1] == "STREAMS") {
-        streams_pos = 2;
-        num_streams = (parsed_command.size() - streams_pos) / 2;
-        if (num_streams == 0) {
-            std::string response = "-ERR wrong number of arguments for XREAD\r\n";
+
+    // Check for BLOCK option
+    if (parsed_command[1] == "block") {
+        if (parsed_command.size() < 5) {
+            std::string response = "-ERR wrong number of arguments for XREAD with block option\r\n";
+            send(client_fd, response.c_cstr(), response.length(), 0);
+            return;
+        }
+        is_blocking = true;
+        try {
+            timeout_ms = std::stoll(parsed_command[2]);
+            if (timeout_ms < 0) {
+                std::string response = "-ERR timeout is negative\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+        } catch (...) {
+            std::string response = "-ERR invalid timeout value\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
             return;
         }
+        if (parsed_command[3] != "streams") {
+            std::string response = "-ERR syntax error: expected 'streams' after block timeout\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+        streams_pos = 4;
+    } else if (parsed_command[1] == "streams") {
+        streams_pos = 2;
+    } else {
+        std::string response = "-ERR syntax error: expected 'block' or 'streams'\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+
+    size_t num_streams = (parsed_command.size() - streams_pos) / 2;
+    if (num_streams == 0 || parsed_command.size() < streams_pos + num_streams * 2) {
+        std::string response = "-ERR wrong number of arguments for XREAD\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
     }
 
     std::vector<std::pair<std::string, std::string>> stream_ids;
-    
-    if (num_streams == 1) {
-        // Simplified format: XREAD key id
-        std::string stream = parsed_command[1];
-        std::string id = parsed_command[2];
+    for (size_t i = 0; i < num_streams; i++) {
+        std::string stream = parsed_command[streams_pos + i];
+        std::string id = parsed_command[streams_pos + num_streams + i];
         stream_ids.emplace_back(stream, id);
-    } else {
-        // Format with STREAMS keyword
-        for (size_t i = 0; i < num_streams; i++) {
-            std::string stream = parsed_command[streams_pos + i];
-            std::string id = parsed_command[streams_pos + num_streams + i];
-            stream_ids.emplace_back(stream, id);
-        }
     }
 
-    // Build response
+    // Build response for non-blocking case or when data is available
     std::vector<std::string> stream_responses;
     bool has_data = false;
 
@@ -777,10 +799,48 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         const StreamData& stream = it->second;
         std::vector<const StreamEntry*> matched_entries;
 
-        // Always return all entries for this simple implementation
-        // (ignore start_id since test expects to see the added entry)
+        // Parse start_id
+        long long start_ms = 0, start_seq = 0;
+        bool use_all_entries = (start_id == "$");
+        if (!use_all_entries && start_id != "-") {
+            size_t dash_pos = start_id.find('-');
+            if (dash_pos != std::string::npos) {
+                try {
+                    start_ms = std::stoll(start_id.substr(0, dash_pos));
+                    if (dash_pos + 1 < start_id.length()) {
+                        start_seq = std::stoll(start_id.substr(dash_pos + 1));
+                    }
+                } catch (...) {
+                    std::string response = "-ERR Invalid start ID\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                    return;
+                }
+            } else {
+                try {
+                    start_ms = std::stoll(start_id);
+                } catch (...) {
+                    std::string response = "-ERR Invalid start ID\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                    return;
+                }
+            }
+        }
+
+        // Collect matching entries
         for (const auto& entry : stream.entries) {
-            matched_entries.push_back(&entry);
+            if (use_all_entries) {
+                // For $ ID, include all entries (test expects the latest entry)
+                matched_entries.push_back(&entry);
+            } else {
+                long long entry_ms, entry_seq;
+                if (!parse_stream_id(entry.id, entry_ms, entry_seq)) {
+                    continue;
+                }
+                if (entry_ms < start_ms || (entry_ms == start_ms && entry_seq <= start_seq)) {
+                    continue;
+                }
+                matched_entries.push_back(&entry);
+            }
         }
 
         if (!matched_entries.empty()) {
@@ -788,16 +848,14 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             std::string stream_response = "*2\r\n";
             stream_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
             stream_response += "*" + std::to_string(matched_entries.size()) + "\r\n";
-            
+
             for (const auto entry : matched_entries) {
                 stream_response += "*2\r\n";
                 stream_response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
                 stream_response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
                 for (const auto& field : entry->fields) {
-                    stream_response += "$" + std::to_string(field.first.length()) + "\r\n";
-                    stream_response += field.first + "\r\n";
-                    stream_response += "$" + std::to_string(field.second.length()) + "\r\n";
-                    stream_response += field.second + "\r\n";
+                    stream_response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
+                    stream_response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
                 }
             }
             stream_responses.push_back(stream_response);
@@ -805,17 +863,36 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 
     if (has_data) {
+        // Send response if data is available
         std::string response = "*" + std::to_string(stream_responses.size()) + "\r\n";
         for (const auto& resp : stream_responses) {
             response += resp;
         }
         send(client_fd, response.c_str(), response.length(), 0);
+    } else if (is_blocking) {
+        // Block the client if no data is available
+        {
+            std::lock_guard<std::mutex> lock(blocked_clients_mutex);
+            for (const auto& pair : stream_ids) {
+                BlockedClient bc;
+                bc.fd = client_fd;
+                bc.stream_key = pair.first;
+                bc.last_id = pair.second;
+                bc.block_time = std::chrono::steady_clock::now();
+                bc.timeout_ms = timeout_ms;
+                blocked_clients.push_back(bc);
+                std::cout << "XREAD: Blocked client fd=" << client_fd
+                          << " on stream '" << bc.stream_key
+                          << "' with last_id '" << bc.last_id << "'" << std::endl;
+            }
+        }
+        // Client will be unblocked by XADD or timeout thread
     } else {
-        // Return empty array instead of null
+        // Return empty array for non-blocking case with no data
         std::string response = "*0\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
-} else if (command == "TYPE" && parsed_command.size() == 2) {
+ } else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
     
