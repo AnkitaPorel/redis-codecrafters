@@ -572,34 +572,29 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::cout << "XADD: Checking " << blocked_clients.size() << " blocked clients" << std::endl;
 
         for (auto it = blocked_clients.begin(); it != blocked_clients.end();) {
-            std::cout << "XADD: Blocked client fd=" << it->fd 
-                      << " on stream '" << it->stream_key 
-                      << "' with last_id '" << it->last_id << "'" << std::endl;
+    if (it->stream_key == stream_key) {
+        long long entry_ms, entry_seq;
+        long long last_ms, last_seq;
 
-            if (it->stream_key == stream_key) {
-                long long entry_ms, entry_seq;
-                long long last_ms, last_seq;
+        bool entry_parsed = parse_stream_id(entry_id, entry_ms, entry_seq);
+        bool last_parsed = parse_stream_id(it->last_id, last_ms, last_seq);
 
-                bool entry_parsed = parse_stream_id(entry_id, entry_ms, entry_seq);
-                bool last_parsed = parse_stream_id(it->last_id, last_ms, last_seq);
-
-                bool should_unblock = false;
-                if (entry_parsed && last_parsed) {
-                    should_unblock = (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq));
-                } else if (it->last_id == "$") {
-                    // For $ ID, always unblock for new entries
-                    should_unblock = true;
-                }
-
-                if (should_unblock) {
-                    std::cout << "XADD: Adding client to unblock list" << std::endl;
-                    to_unblock.push_back(*it);
-                    it = blocked_clients.erase(it);
-                    continue;
-                }
-            }
-            ++it;
+        bool should_unblock = false;
+        if (entry_parsed && last_parsed) {
+            should_unblock = (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq));
+        } else if (it->last_id == "$") {
+            // For $ ID, always unblock for new entries
+            should_unblock = true;
         }
+
+        if (should_unblock) {
+            to_unblock.push_back(*it);
+            it = blocked_clients.erase(it);
+            continue;
+        }
+    }
+    ++it;
+}
     }
 
     std::cout << "XADD: Will unblock " << to_unblock.size() << " clients" << std::endl;
@@ -823,7 +818,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             long long entry_ms, entry_seq;
             if (!parse_stream_id(entry.id, entry_ms, entry_seq)) continue;
 
-            if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq >= start_seq)) {
+            if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
                 matches.push_back(&entry);
             }
         }
