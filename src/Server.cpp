@@ -625,7 +625,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     if (connected_replicas.find(client_fd) == connected_replicas.end()) {
         propagate_to_replicas(parsed_command);
     }
-    } else if (command == "XRANGE" && parsed_command.size() == 4) {
+} else if (command == "XRANGE" && parsed_command.size() == 4) {
     std::string stream_key = parsed_command[1];
     std::string start_id = parsed_command[2];
     std::string end_id = parsed_command[3];
@@ -780,7 +780,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         streams.emplace_back(parsed_command[i], id);
     }
 
-    // Check for existing entries first
+    // Check for existing entries
     std::vector<std::string> responses;
     bool has_data = false;
 
@@ -841,6 +841,21 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
 
+    // If block_time is 0, return immediately with available data or *-1
+    if (block_time == 0) {
+        if (has_data) {
+            std::string final_response = "*" + std::to_string(responses.size()) + "\r\n";
+            for (const auto& resp : responses) {
+                final_response += resp;
+            }
+            send(client_fd, final_response.c_str(), final_response.length(), 0);
+        } else {
+            send(client_fd, "*-1\r\n", 5, 0);
+        }
+        return;
+    }
+
+    // Handle blocking case for non-zero block_time
     if (has_data) {
         std::string final_response = "*" + std::to_string(responses.size()) + "\r\n";
         for (const auto& resp : responses) {
@@ -850,8 +865,8 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
-    // Handle blocking case
-    if (block_time >= 0) {
+    // Add to blocked clients for non-zero block_time
+    if (block_time > 0) {
         if (streams.size() != 1) {
             send(client_fd, "-ERR BLOCK option is only supported for a single stream\r\n", 56, 0);
             return;
@@ -885,7 +900,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 
     send(client_fd, "*-1\r\n", 5, 0);
-    } else if (command == "TYPE" && parsed_command.size() == 2) {
+} else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
     
