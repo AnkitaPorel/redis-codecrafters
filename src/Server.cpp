@@ -659,18 +659,10 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "XREAD") {
-    // Parse BLOCK parameter if present
-    int block_time = -1; // -1 means no blocking
-    size_t streams_pos = 1;
+        int block_time = -1;
+        size_t streams_pos = 1;
     
-    // Check for BLOCK parameter
-    if (parsed_command.size() > 1 && parsed_command[1] == "BLOCK") {
-        if (parsed_command.size() < 4) {
-            std::string response = "-ERR wrong number of arguments for XREAD\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
-        }
-        
+    if (parsed_command.size() > 2 && parsed_command[1] == "BLOCK") {
         try {
             block_time = std::stoi(parsed_command[2]);
             if (block_time < 0) {
@@ -678,7 +670,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 send(client_fd, response.c_str(), response.length(), 0);
                 return;
             }
-            streams_pos = 3;
+            streams_pos = 4;
         } catch (...) {
             std::string response = "-ERR invalid timeout value\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
@@ -686,7 +678,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
     
-    // Check STREAMS keyword
     if (parsed_command.size() <= streams_pos || parsed_command[streams_pos] != "STREAMS") {
         std::string response = "-ERR syntax error, STREAMS keyword expected\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -702,7 +693,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
     
-    // For simplicity, we'll handle single stream blocking first
     if (block_time >= 0 && (ids_start - keys_start) != 1) {
         std::string response = "-ERR BLOCK option is only supported for a single stream\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -714,7 +704,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         key_id_pairs.emplace_back(parsed_command[i], parsed_command[i + (ids_start - keys_start)]);
     }
     
-    // Check if we have data available immediately
     std::string response;
     bool found_any = false;
     std::vector<std::string> stream_responses;
