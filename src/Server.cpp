@@ -732,11 +732,64 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         const StreamData& stream = stream_it->second;
         std::vector<const StreamEntry*> matched_entries;
         
-        // ... (same matching logic as before)
+        long long start_ms = 0, start_seq = 0;
+        if (start_id == "-") {
+            start_ms = 0;
+            start_seq = 0;
+        } else {
+            size_t dash_pos = start_id.find('-');
+            if (dash_pos != std::string::npos) {
+                try {
+                    start_ms = std::stoll(start_id.substr(0, dash_pos));
+                    if (dash_pos + 1 < start_id.length()) {
+                        start_seq = std::stoll(start_id.substr(dash_pos + 1));
+                    }
+                } catch (...) {
+                    send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
+                    return;
+                }
+            } else {
+                try {
+                    start_ms = std::stoll(start_id);
+                } catch (...) {
+                    send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
+                    return;
+                }
+            }
+        }
+
+        for (const auto& entry : stream.entries) {
+            long long entry_ms, entry_seq;
+            if (!parse_stream_id(entry.id, entry_ms, entry_seq)) {
+                continue;
+            }
+
+            if (entry_ms < start_ms || (entry_ms == start_ms && entry_seq < start_seq)) {
+                continue;
+            }
+
+            matched_entries.push_back(&entry);
+        }
         
         if (!matched_entries.empty()) {
             found_any = true;
-            // ... (same response building logic as before)
+            std::string stream_response = "*2\r\n";
+            stream_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
+            stream_response += "*" + std::to_string(matched_entries.size()) + "\r\n";
+            
+            for (const auto entry : matched_entries) {
+                stream_response += "*2\r\n";
+                stream_response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
+                stream_response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
+                for (const auto& field : entry->fields) {
+                    stream_response += "$" + std::to_string(field.first.length()) + "\r\n";
+                    stream_response += field.first + "\r\n";
+                    stream_response += "$" + std::to_string(field.second.length()) + "\r\n";
+                    stream_response += field.second + "\r\n";
+                }
+            }
+            
+            stream_responses.push_back(stream_response);
         }
     }
     
