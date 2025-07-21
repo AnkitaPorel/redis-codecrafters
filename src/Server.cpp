@@ -769,12 +769,10 @@ if (!stream_store[stream_key].entries.empty()) {
     std::vector<std::pair<std::string, std::string>> key_id_pairs;
     for (size_t i = keys_start; i < ids_start; i++) {
         std::string id = parsed_command[i + (ids_start - keys_start)];
-        
-        // Handle $ symbol - we'll process this specially during the search
         key_id_pairs.emplace_back(parsed_command[i], id);
     }
 
-    std::string response;
+    // Check for new entries immediately
     bool found_any = false;
     std::vector<std::string> stream_responses;
 
@@ -790,7 +788,7 @@ if (!stream_store[stream_key].entries.empty()) {
         const StreamData& stream = stream_it->second;
         std::vector<const StreamEntry*> matched_entries;
 
-        // Special handling for $ - use the last ID in the stream
+        // Handle $ symbol - use the last ID in the stream
         if (start_id == "$") {
             if (!stream.entries.empty()) {
                 start_id = stream.entries.back().id;
@@ -833,11 +831,9 @@ if (!stream_store[stream_key].entries.empty()) {
             }
 
             // For XREAD, we want entries with ID strictly greater than start_id
-            if (entry_ms < start_ms || (entry_ms == start_ms && entry_seq <= start_seq)) {
-                continue;
+            if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
+                matched_entries.push_back(&entry);
             }
-
-            matched_entries.push_back(&entry);
         }
 
         if (!matched_entries.empty()) {
@@ -864,11 +860,12 @@ if (!stream_store[stream_key].entries.empty()) {
 
     if (found_any) {
         // Send data immediately
-        response = "*" + std::to_string(stream_responses.size()) + "\r\n";
+        std::string response = "*" + std::to_string(stream_responses.size()) + "\r\n";
         for (const auto& stream_resp : stream_responses) {
             response += stream_resp;
         }
         send(client_fd, response.c_str(), response.length(), 0);
+        return;
     } else if (block_time >= 0) {
         // No data available and BLOCK specified
         if (key_id_pairs.size() != 1) {
@@ -877,10 +874,12 @@ if (!stream_store[stream_key].entries.empty()) {
             return;
         }
 
-        // Determine the last ID to use for blocking
+        const std::string& stream_key = key_id_pairs[0].first;
         std::string last_id = key_id_pairs[0].second;
-        auto stream_it = stream_store.find(key_id_pairs[0].first);
+
+        // Handle $ symbol for blocking
         if (last_id == "$") {
+            auto stream_it = stream_store.find(stream_key);
             if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
                 last_id = stream_it->second.entries.back().id;
             } else {
@@ -891,7 +890,7 @@ if (!stream_store[stream_key].entries.empty()) {
         // Add to blocked clients list
         BlockedClient client;
         client.fd = client_fd;
-        client.stream_key = key_id_pairs[0].first;
+        client.stream_key = stream_key;
         client.last_id = last_id;
         client.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_time);
 
@@ -904,8 +903,7 @@ if (!stream_store[stream_key].entries.empty()) {
         return;
     } else {
         // No data and no blocking
-        response = "$-1\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
+        send(client_fd, "$-1\r\n", 5, 0);
     }
     } else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
