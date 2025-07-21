@@ -918,6 +918,16 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             propagate_to_replicas(parsed_command);
         }
     }
+} else if (command == "EXEC" && parsed_command.size() == 1) {
+    {
+        std::lock_guard<std::mutex> lock(multi_mutex);
+        if (clients_in_multi.find(client_fd) == clients_in_multi.end()) {
+            std::string response = "-ERR EXEC without MULTI\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+    }
+    // For now, we just handle the error case - actual EXEC implementation will come later
 } else if (command == "MULTI" && parsed_command.size() == 1) {
     {
         std::lock_guard<std::mutex> lock(multi_mutex);
