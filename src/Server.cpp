@@ -679,8 +679,17 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
 
-    // Verify STREAMS keyword
-    if (parsed_command.size() <= streams_pos || parsed_command[streams_pos] != "STREAMS") {
+    // Verify STREAMS keyword (case-insensitive)
+    if (parsed_command.size() <= streams_pos) {
+        std::string response = "-ERR syntax error, STREAMS keyword expected\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+    std::string streams_keyword = parsed_command[streams_pos];
+    for (char& c : streams_keyword) {
+        c = std::toupper(c);
+    }
+    if (streams_keyword != "STREAMS") {
         std::string response = "-ERR syntax error, STREAMS keyword expected\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
