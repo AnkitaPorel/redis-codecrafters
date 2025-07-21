@@ -473,13 +473,18 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
     } else if (command == "XADD") {
         if (parsed_command.size() < 5 || (parsed_command.size() % 2 == 0)) {
-            std::string response = "-ERR wrong number of arguments for XADD\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
-        }
+        std::string response = "-ERR wrong number of arguments for XADD\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
 
-        std::string stream_key = parsed_command[1];
-        std::string entry_id = parsed_command[2];
+    std::string stream_key = parsed_command[1];
+    std::string entry_id = parsed_command[2];
+
+    // Handle auto-generated ID case
+    if (entry_id == "*") {
+        entry_id = generate_stream_id();
+    }
 
     // Create stream if it doesn't exist
     if (stream_store.find(stream_key) == stream_store.end()) {
@@ -488,23 +493,10 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     // Validate the ID format
     long long ms, seq;
-    if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq <= 0) {
+    if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
         std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
-    }
-
-    // Check if ID is greater than last entry
-    if (!stream_store[stream_key].entries.empty()) {
-        const auto& last_entry = stream_store[stream_key].entries.back();
-        long long last_ms, last_seq;
-        if (parse_stream_id(last_entry.id, last_ms, last_seq)) {
-            if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
-                std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-                send(client_fd, response.c_str(), response.length(), 0);
-                return;
-            }
-        }
     }
 
     // Create new entry

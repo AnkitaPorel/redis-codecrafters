@@ -123,6 +123,24 @@ std::string command_to_resp_array(const std::vector<std::string>& command) {
     return resp;
 }
 
+std::string generate_stream_id() {
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    
+    static long long last_ms = 0;
+    static long long seq = 0;
+    
+    if (millis == last_ms) {
+        seq++;
+    } else {
+        last_ms = millis;
+        seq = 0;
+    }
+    
+    return std::to_string(last_ms) + "-" + std::to_string(seq);
+}
+
 void check_blocked_clients_timeout() {
     while (!shutdown_server) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
