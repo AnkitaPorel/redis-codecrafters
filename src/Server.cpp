@@ -659,23 +659,29 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "XREAD") {
-    int block_time = -1;
+        int block_time = -1;
     size_t streams_pos = 1;
 
-    // Check for BLOCK option
-    if (parsed_command.size() > 2 && parsed_command[1] == "BLOCK") {
-        try {
-            block_time = std::stoi(parsed_command[2]);
-            if (block_time < 0) {
-                std::string response = "-ERR timeout is negative\r\n";
+    // Check for BLOCK option (case-insensitive)
+    if (parsed_command.size() > 2) {
+        std::string second_arg = parsed_command[1];
+        for (char& c : second_arg) {
+            c = std::toupper(c);
+        }
+        if (second_arg == "BLOCK") {
+            try {
+                block_time = std::stoi(parsed_command[2]);
+                if (block_time < 0) {
+                    std::string response = "-ERR timeout is negative\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                    return;
+                }
+                streams_pos = 3; // Adjust to account for BLOCK and timeout
+            } catch (...) {
+                std::string response = "-ERR invalid timeout value\r\n";
                 send(client_fd, response.c_str(), response.length(), 0);
                 return;
             }
-            streams_pos = 3; // Adjust to account for BLOCK and timeout
-        } catch (...) {
-            std::string response = "-ERR invalid timeout value\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
         }
     }
 
