@@ -473,6 +473,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
     } else if (command == "XADD") {
     // Minimum 4 args: XADD, stream, ID, at least one field-value pair
+    // Must have even number of arguments (XADD + stream + ID + field-value pairs)
     if (parsed_command.size() < 4 || (parsed_command.size() % 2 != 0)) {
         std::string response = "-ERR wrong number of arguments for XADD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
