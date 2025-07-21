@@ -807,18 +807,25 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
         }
 
-        // Find matching entries (entries AFTER the specified ID)
         std::vector<const StreamEntry*> matches;
-        for (const auto& entry : stream_it->second.entries) {
-            long long entry_ms, entry_seq;
-            if (!parse_stream_id(entry.id, entry_ms, entry_seq)) continue;
+    for (const auto& entry : stream_it->second.entries) {
+        long long entry_ms, entry_seq;
+        if (!parse_stream_id(entry.id, entry_ms, entry_seq)) continue;
 
-            // For blocking with $, we want entries added AFTER the current last entry
-            // For regular IDs, we want entries with IDs greater than the specified ID
+        // For blocking with $, we want entries added AFTER the current last entry
+        // For regular IDs, we want entries with IDs greater than the specified ID
+        if (original_start_id == "$") {
+            // If using $, we want entries added after we started blocking
+            if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
+                matches.push_back(&entry);
+            }
+        } else {
+            // For explicit IDs, we want entries with IDs greater than specified
             if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
                 matches.push_back(&entry);
             }
         }
+    }
 
         if (!matches.empty()) {
             has_data = true;
@@ -869,16 +876,24 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     auto& [stream_key, last_id] = streams[0];
     
-    // For blocking, we need to store the last ID we've seen
     std::string blocking_last_id = last_id;
-    if (last_id == "$") {
-        auto stream_it = stream_store.find(stream_key);
-        if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
-            blocking_last_id = stream_it->second.entries.back().id;
-        } else {
-            blocking_last_id = "0-0";
-        }
+if (last_id == "$") {
+    auto stream_it = stream_store.find(stream_key);
+    if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
+        // For $, we need to get the last ID in the stream
+        blocking_last_id = stream_it->second.entries.back().id;
+    } else {
+        blocking_last_id = "0-0";
     }
+} else {
+    // For explicit IDs, we need to parse and validate it
+    long long ms, seq;
+    if (!parse_stream_id(last_id, ms, seq)) {
+        send(client_fd, "-ERR Invalid ID\r\n", 17, 0);
+        return;
+    }
+    blocking_last_id = last_id;
+}
 
     // Add to blocked clients
     BlockedClient client;
