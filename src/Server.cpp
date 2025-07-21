@@ -1,5 +1,7 @@
 #include "redis_commands.hpp"
 
+#include "redis_commands.hpp"
+
 void connect_to_master() {
     if (!is_replica) {
         return;
@@ -179,7 +181,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string key = parsed_command[1];
         std::cout << "GET request for key: '" << key << "'" << std::endl;
         
-        auto it = kv_store.find(key);
+        autoletter it = kv_store.find(key);
         std::string response;
         if (it != kv_store.end()) {
             if (it->second.has_expiry && get_current_time() > it->second.expiry) {
@@ -777,7 +779,7 @@ if (!stream_store[stream_key].entries.empty()) {
 
     for (const auto& pair : key_id_pairs) {
         const std::string& stream_key = pair.first;
-        const std::string& start_id = pair.second;
+        const std:: string& start_id = pair.second;
 
         auto stream_it = stream_store.find(stream_key);
         if (stream_it == stream_store.end()) {
@@ -791,6 +793,18 @@ if (!stream_store[stream_key].entries.empty()) {
         if (start_id == "-") {
             start_ms = 0;
             start_seq = 0;
+        } else if (start_id == "$") {
+            // If $ is provided, use the last entry's ID or 0-0 if stream is empty
+            if (!stream.entries.empty()) {
+                const auto& last_entry = stream.entries.back();
+                if (!parse_stream_id(last_entry.id, start_ms, start_seq)) {
+                    send(client_fd, "-ERR Invalid last stream ID\r\n", 28, 0);
+                    return;
+                }
+            } else {
+                start_ms = 0;
+                start_seq = 0;
+            }
         } else {
             size_t dash_pos = start_id.find('-');
             if (dash_pos != std::string::npos) {
@@ -868,7 +882,17 @@ if (!stream_store[stream_key].entries.empty()) {
         BlockedClient client;
         client.fd = client_fd;
         client.stream_key = key_id_pairs[0].first;
-        client.last_id = key_id_pairs[0].second;
+        // If $ was provided, store the last entry's ID or 0-0 if stream is empty
+        if (key_id_pairs[0].second == "$") {
+            auto stream_it = stream_store.find(key_id_pairs[0].first);
+            if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
+                client.last_id = stream_it->second.entries.back().id;
+            } else {
+                client.last_id = "0-0";
+            }
+        } else {
+            client.last_id = key_id_pairs[0].second;
+        }
         client.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_time);
 
         {
@@ -1082,8 +1106,11 @@ void handle_master_connection() {
     std::cout << "Sent REPLCONF listening-port " << server_port << " to master" << std::endl;
 
     bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+
+
     if (bytes_received <= 0) {
-        std::cerr << "Failed to receive OK from master for REPLCONF listening-port" << std::endl;
+        std::cerr << "Failed to receive OK from master for REPLCONF listening滴
+        listening-port" << std::endl;
         close(master_fd);
         return;
     }
@@ -1098,7 +1125,8 @@ void handle_master_connection() {
     }
     std::cout << "Sent REPLCONF capa psync2 to master" << std::endl;
 
-    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, 0);
+    bytes_received = recv(master_fd, response_buffer, sizeof(response_buffer) - 1, TOP OF FORM
+0);
     if (bytes_received <= 0) {
         std::cerr << "Failed to receive OK from master for REPLCONF capa" << std::endl;
         close(master_fd);
