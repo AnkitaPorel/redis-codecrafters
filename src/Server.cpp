@@ -994,8 +994,14 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 
     send(client_fd, response.c_str(), response.length(), 0);
-    } else if (command == "XREAD" && parsed_command.size() >= 3 && parsed_command[1] == "STREAMS") {
-    // XREAD STREAMS key1 key2 ... id1 id2 ...
+    } else if (command == "XREAD" && parsed_command.size() >= 4) {
+    // Check if "STREAMS" is present at the right position
+    if (parsed_command[1] != "STREAMS") {
+        std::string response = "-ERR syntax error\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+
     size_t keys_start = 2;
     size_t ids_start = keys_start + (parsed_command.size() - keys_start) / 2;
     
@@ -1010,8 +1016,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         key_id_pairs.emplace_back(parsed_command[i], parsed_command[i + (ids_start - keys_start)]);
     }
     
-    std::string response = "*" + std::to_string(key_id_pairs.size()) + "\r\n";
+    std::string response;
     bool found_any = false;
+    std::vector<std::string> stream_responses;
     
     for (const auto& pair : key_id_pairs) {
         const std::string& stream_key = pair.first;
@@ -1067,25 +1074,32 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         
         if (!matched_entries.empty()) {
             found_any = true;
-            response += "*2\r\n";
-            response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
+            std::string stream_response;
+            stream_response += "*2\r\n";
+            stream_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
             
-            response += "*" + std::to_string(matched_entries.size()) + "\r\n";
+            stream_response += "*" + std::to_string(matched_entries.size()) + "\r\n";
             for (const auto entry : matched_entries) {
-                response += "*2\r\n";
-                response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
+                stream_response += "*2\r\n";
+                stream_response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
                 
-                response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
+                stream_response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
                 for (const auto& field : entry->fields) {
-                    response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
-                    response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
+                    stream_response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
+                    stream_response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
                 }
             }
+            stream_responses.push_back(stream_response);
         }
     }
     
     if (!found_any) {
         response = "*-1\r\n";
+    } else {
+        response = "*" + std::to_string(stream_responses.size()) + "\r\n";
+        for (const auto& stream_resp : stream_responses) {
+            response += stream_resp;
+        }
     }
     
     send(client_fd, response.c_str(), response.length(), 0);
