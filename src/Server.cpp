@@ -772,7 +772,7 @@ if (!stream_store[stream_key].entries.empty()) {
         key_id_pairs.emplace_back(parsed_command[i], id);
     }
 
-    // Check for new entries immediately
+    // First check if there are any matching entries already
     bool found_any = false;
     std::vector<std::string> stream_responses;
 
@@ -807,9 +807,7 @@ if (!stream_store[stream_key].entries.empty()) {
             if (dash_pos != std::string::npos) {
                 try {
                     start_ms = std::stoll(start_id.substr(0, dash_pos));
-                    if (dash_pos + 1 < start_id.length()) {
-                        start_seq = std::stoll(start_id.substr(dash_pos + 1));
-                    }
+                    start_seq = std::stoll(start_id.substr(dash_pos + 1));
                 } catch (...) {
                     send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
                     return;
@@ -817,6 +815,7 @@ if (!stream_store[stream_key].entries.empty()) {
             } else {
                 try {
                     start_ms = std::stoll(start_id);
+                    start_seq = 0;
                 } catch (...) {
                     send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
                     return;
@@ -830,7 +829,6 @@ if (!stream_store[stream_key].entries.empty()) {
                 continue;
             }
 
-            // For XREAD, we want entries with ID strictly greater than start_id
             if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
                 matched_entries.push_back(&entry);
             }
