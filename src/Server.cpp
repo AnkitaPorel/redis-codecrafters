@@ -961,7 +961,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
-
+}
 
 std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
     std::string response;
