@@ -1405,51 +1405,61 @@ int main(int argc, char **argv) {
             int client_fd = *it;
             
             if (FD_ISSET(client_fd, &read_fds)) {
-                char buffer[4096];
-                ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+    char buffer[4096];
+    ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
-                if (bytes_received <= 0) {
-                    // Client disconnected or error occurred
-                    if (bytes_received == 0) {
-                        std::cout << "Client (fd: " << client_fd << ") disconnected" << std::endl;
-                    } else {
-                        std::cerr << "recv error from client (fd: " << client_fd << "): " << strerror(errno) << std::endl;
-                    }
+    if (bytes_received <= 0) {
+        // Client disconnected or error occurred
+        if (bytes_received == 0) {
+            std::cout << "Client (fd: " << client_fd << ") disconnected" << std::endl;
+        } else {
+            std::cerr << "recv error from client (fd: " << client_fd << "): " << strerror(errno) << std::endl;
+        }
 
-                    // Clean up client resources
-                    {
-                        std::lock_guard<std::mutex> lock(blocked_clients_mutex);
-                        blocked_clients.erase(
-                            std::remove_if(blocked_clients.begin(), blocked_clients.end(),
-                                [client_fd](const BlockedClient& bc) { return bc.fd == client_fd; }),
-                            blocked_clients.end());
-                    }
+        // Clean up client resources
+        {
+            std::lock_guard<std::mutex> lock(blocked_clients_mutex);
+            blocked_clients.erase(
+                std::remove_if(blocked_clients.begin(), blocked_clients.end(),
+                    [client_fd](const BlockedClient& bc) { return bc.fd == client_fd; }),
+                blocked_clients.end());
+        }
 
-                    replica_info.erase(client_fd);
-                    connected_replicas.erase(client_fd);
-                    {
-                        std::lock_guard<std::mutex> wait_lock(wait_mutex);
-                        replica_ack_offsets.erase(client_fd);
-                    }
+        replica_info.erase(client_fd);
+        connected_replicas.erase(client_fd);
+        {
+            std::lock_guard<std::mutex> wait_lock(wait_mutex);
+            replica_ack_offsets.erase(client_fd);
+        }
 
-                    close(client_fd);
-                    it = client_fds.erase(it);
-                    continue;
-                }
+        close(client_fd);
+        it = client_fds.erase(it);
+        continue;
+    }
 
-                // Process received data
-                buffer[bytes_received] = '\0';
-                std::cout << "Received from client (fd: " << client_fd << "): " << buffer << std::endl;
+    // Process received data
+    buffer[bytes_received] = '\0';
+    std::cout << "Received from client (fd: " << client_fd << ") [" << bytes_received << " bytes]: ";
+    for (ssize_t i = 0; i < bytes_received; ++i) {
+        if (buffer[i] == '\r') {
+            std::cout << "\\r";
+        } else if (buffer[i] == '\n') {
+            std::cout << "\\n";
+        } else {
+            std::cout << buffer[i];
+        }
+    }
+    std::cout << std::endl;
 
-                try {
-                    std::vector<std::string> parsed_command;
-                    parse_redis_command(buffer, parsed_command);
-                    execute_redis_command(client_fd, parsed_command);
-                } catch (const std::exception& e) {
-                    std::string response = "-ERR protocol error: " + std::string(e.what()) + "\r\n";
-                    send(client_fd, response.c_str(), response.length(), 0);
-                }
-            }
+    try {
+        std::vector<std::string> parsed_command;
+        parse_redis_command(buffer, parsed_command);
+        execute_redis_command(client_fd, parsed_command);
+    } catch (const std::exception& e) {
+        std::string response = "-ERR protocol error: " + std::string(e.what()) + "\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    }
+}
             ++it;
         }
     }
