@@ -994,14 +994,20 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 
     send(client_fd, response.c_str(), response.length(), 0);
-    } else if (command == "XREAD" && parsed_command.size() >= 4) {
-    // Check if "STREAMS" is present at the right position
-    if (parsed_command[1] != "STREAMS") {
-        std::string response = "-ERR syntax error\r\n";
+    } else if (command == "XREAD") {
+    // Convert the second argument to uppercase for comparison
+    std::string streams_arg = parsed_command.size() > 1 ? parsed_command[1] : "";
+    for (char& c : streams_arg) {
+        c = std::toupper(c);
+    }
+
+    if (parsed_command.size() < 4 || streams_arg != "STREAMS") {
+        std::string response = "-ERR wrong number of arguments for XREAD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
 
+    // The rest of your XREAD implementation...
     size_t keys_start = 2;
     size_t ids_start = keys_start + (parsed_command.size() - keys_start) / 2;
     
