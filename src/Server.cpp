@@ -866,8 +866,7 @@ if (!stream_store[stream_key].entries.empty()) {
         return;
     }
 
-    // No data found
-    send(client_fd, "$-1\r\n", 5, 0);
+    send(client_fd, "*-1\r\n", 5, 0);
     } else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
