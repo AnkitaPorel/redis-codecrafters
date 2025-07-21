@@ -77,6 +77,8 @@ std::mutex multi_mutex;
 std::map<int, std::vector<std::vector<std::string>>> queued_commands;
 std::mutex queue_mutex;
 
+std::map<std::string, std::vector<std::string>> list_store;
+
 std::atomic<bool> shutdown_server(false);
 
 std::mutex blocked_clients_mutex;
