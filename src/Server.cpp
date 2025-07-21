@@ -472,7 +472,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send(client_fd, response.c_str(), response.length(), 0);
     }
     } else if (command == "XADD") {
-        if (parsed_command.size() < 5 || (parsed_command.size() % 2 == 0)) {
+    if (parsed_command.size() < 5 || (parsed_command.size() % 2 == 0)) {
         std::string response = "-ERR wrong number of arguments for XADD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
@@ -484,75 +484,72 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     // Handle auto-generated IDs
     if (entry_id == "*") {
         entry_id = generate_stream_id();
-    }
-    // Handle partial IDs (e.g., "0-*")
-    else {
-    size_t dash_pos = entry_id.find('-');
-    if (dash_pos != std::string::npos && entry_id.substr(dash_pos+1) == "*") {
-        std::string ms_str = entry_id.substr(0, dash_pos);
-        try {
-            long long ms_val = std::stoll(ms_str);
-            long long seq_val = 0;
+    } else {
+        size_t dash_pos = entry_id.find('-');
+        if (dash_pos != std::string::npos && entry_id.substr(dash_pos+1) == "*") {
+            std::string ms_str = entry_id.substr(0, dash_pos);
+            try {
+                long long ms_val = std::stoll(ms_str);
+                long long seq_val = 0;
 
-            // Special case: if ms_val is 0, seq_val must be at least 1
-            if (ms_val == 0) {
-                seq_val = 1;
-            }
+                // Special case: if ms_val is 0, seq_val must be at least 1
+                if (ms_val == 0) {
+                    seq_val = 1;
+                }
 
-            // Find next sequence number if stream exists
-            if (stream_store.find(stream_key) != stream_store.end()) {
-                auto& entries = stream_store[stream_key].entries;
-                if (!entries.empty()) {
-                    const auto& last_entry = entries.back();
-                    long long last_ms, last_seq;
-                    if (parse_stream_id(last_entry.id, last_ms, last_seq) && last_ms == ms_val) {
-                        // If we have entries with the same millisecond, increment sequence
-                        seq_val = std::max(seq_val, last_seq + 1);
+                // Find next sequence number if stream exists
+                if (stream_store.find(stream_key) != stream_store.end()) {
+                    auto& entries = stream_store[stream_key].entries;
+                    if (!entries.empty()) {
+                        const auto& last_entry = entries.back();
+                        long long last_ms, last_seq;
+                        if (parse_stream_id(last_entry.id, last_ms, last_seq) && last_ms == ms_val) {
+                            seq_val = std::max(seq_val, last_seq + 1);
+                        }
                     }
                 }
-            }
 
-            entry_id = ms_str + "-" + std::to_string(seq_val);
-        } catch (...) {
-            std::string response = "-ERR Invalid ID format for milliseconds part\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
+                entry_id = ms_str + "-" + std::to_string(seq_val);
+            } catch (...) {
+                std::string response = "-ERR Invalid ID format for milliseconds part\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
         }
     }
+
+    // Validate ID format
+    long long ms, seq;
+    if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
+        std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+
+    // Check for 0-0 specifically (invalid ID)
+    if (ms == 0 && seq == 0) {
+        std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+
+    // Check ID ordering against existing entries
+    if (!stream_store[stream_key].entries.empty()) {
+        const auto& last_entry = stream_store[stream_key].entries.back();
+        long long last_ms, last_seq;
+        if (parse_stream_id(last_entry.id, last_ms, last_seq)) {
+            if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
+                std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+        }
     }
 
     // Create stream if needed
     if (stream_store.find(stream_key) == stream_store.end()) {
         stream_store[stream_key] = StreamData();
     }
-
-    // Validate ID format
-    long long ms, seq;
-if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
-    std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-    send(client_fd, response.c_str(), response.length(), 0);
-    return;
-}
-
-// Check for 0-0 specifically (invalid ID)
-if (ms == 0 && seq == 0) {
-    std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-    send(client_fd, response.c_str(), response.length(), 0);
-    return;
-}
-
-// Check ID ordering against existing entries
-if (!stream_store[stream_key].entries.empty()) {
-    const auto& last_entry = stream_store[stream_key].entries.back();
-    long long last_ms, last_seq;
-    if (parse_stream_id(last_entry.id, last_ms, last_seq)) {
-        if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
-            std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
-        }
-    }
-}
 
     // Create new entry
     StreamEntry new_entry(entry_id);
@@ -573,35 +570,32 @@ if (!stream_store[stream_key].entries.empty()) {
         std::lock_guard<std::mutex> lock(blocked_clients_mutex);
         std::cout << "XADD: Added entry " << entry_id << " to stream " << stream_key << std::endl;
         std::cout << "XADD: Checking " << blocked_clients.size() << " blocked clients" << std::endl;
-        
+
         for (auto it = blocked_clients.begin(); it != blocked_clients.end();) {
             std::cout << "XADD: Blocked client fd=" << it->fd 
                       << " on stream '" << it->stream_key 
                       << "' with last_id '" << it->last_id << "'" << std::endl;
-                      
+
             if (it->stream_key == stream_key) {
-                std::cout << "XADD: Stream key matches!" << std::endl;
                 long long entry_ms, entry_seq;
                 long long last_ms, last_seq;
-                
+
                 bool entry_parsed = parse_stream_id(entry_id, entry_ms, entry_seq);
                 bool last_parsed = parse_stream_id(it->last_id, last_ms, last_seq);
-                
-                std::cout << "XADD: entry_id=" << entry_id << " parsed=" << entry_parsed 
-                          << " (ms=" << entry_ms << ", seq=" << entry_seq << ")" << std::endl;
-                std::cout << "XADD: last_id=" << it->last_id << " parsed=" << last_parsed 
-                          << " (ms=" << last_ms << ", seq=" << last_seq << ")" << std::endl;
-                
+
+                bool should_unblock = false;
                 if (entry_parsed && last_parsed) {
-                    bool should_unblock = (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq));
-                    std::cout << "XADD: should_unblock=" << should_unblock << std::endl;
-                    
-                    if (should_unblock) {
-                        std::cout << "XADD: Adding client to unblock list" << std::endl;
-                        to_unblock.push_back(*it);
-                        it = blocked_clients.erase(it);
-                        continue;
-                    }
+                    should_unblock = (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq));
+                } else if (it->last_id == "$") {
+                    // For $ ID, always unblock for new entries
+                    should_unblock = true;
+                }
+
+                if (should_unblock) {
+                    std::cout << "XADD: Adding client to unblock list" << std::endl;
+                    to_unblock.push_back(*it);
+                    it = blocked_clients.erase(it);
+                    continue;
                 }
             }
             ++it;
@@ -615,13 +609,13 @@ if (!stream_store[stream_key].entries.empty()) {
         std::string unblock_response = "*1\r\n*2\r\n";
         unblock_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
         unblock_response += "*1\r\n*2\r\n";
-        unblock_response += "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
+        unblock_response += "$" + std::to_string(new_entry.id.length()) + "\r\n" + new_entry.id + "\r\n";
         unblock_response += "*" + std::to_string(new_entry.fields.size() * 2) + "\r\n";
         for (const auto& field : new_entry.fields) {
             unblock_response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
             unblock_response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
         }
-        
+
         std::cout << "XADD: Sending unblock response to fd=" << client.fd 
                   << ": " << unblock_response << std::endl;
         send(client.fd, unblock_response.c_str(), unblock_response.length(), 0);
