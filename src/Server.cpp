@@ -354,180 +354,179 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     } else if (command == "WAIT" && parsed_command.size() == 3) {
         try {
-        int num_replicas_expected = std::stoi(parsed_command[1]);
-        int timeout_ms = std::stoi(parsed_command[2]);
-        
-        std::cout << "WAIT command: expecting " << num_replicas_expected 
-                  << " replicas, timeout " << timeout_ms << "ms" << std::endl;
-        
-        int current_connected = connected_replicas.size();
-        
-        if (current_connected == 0) {
-            std::string response = ":0\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            std::cout << "No replicas connected, returning 0" << std::endl;
-            return;
-        }
-        
-        if (master_offset == 0) {
-            std::string response = ":" + std::to_string(current_connected) + "\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            std::cout << "No writes to replicate, returning " << current_connected << std::endl;
-            return;
-        }
-        
-        {
-            std::lock_guard<std::mutex> wait_lock(wait_mutex);
-            pending_wait_offset = master_offset;
-            expected_replicas = num_replicas_expected;
-            acked_replicas = 0;
+            int num_replicas_expected = std::stoi(parsed_command[1]);
+            int timeout_ms = std::stoi(parsed_command[2]);
             
-            for (int replica_fd : connected_replicas) {
-                if (replica_ack_offsets.find(replica_fd) == replica_ack_offsets.end()) {
-                    replica_ack_offsets[replica_fd] = 0;
+            std::cout << "WAIT command: expecting " << num_replicas_expected 
+                    << " replicas, timeout " << timeout_ms << "ms" << std::endl;
+            
+            int current_connected = connected_replicas.size();
+            
+            if (current_connected == 0) {
+                std::string response = ":0\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                std::cout << "No replicas connected, returning 0" << std::endl;
+                return;
+            }
+            
+            if (master_offset == 0) {
+                std::string response = ":" + std::to_string(current_connected) + "\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                std::cout << "No writes to replicate, returning " << current_connected << std::endl;
+                return;
+            }
+            
+            {
+                std::lock_guard<std::mutex> wait_lock(wait_mutex);
+                pending_wait_offset = master_offset;
+                expected_replicas = num_replicas_expected;
+                acked_replicas = 0;
+                
+                for (int replica_fd : connected_replicas) {
+                    if (replica_ack_offsets.find(replica_fd) == replica_ack_offsets.end()) {
+                        replica_ack_offsets[replica_fd] = 0;
+                    }
                 }
             }
-        }
-        
-        send_getack_to_replicas();
-        
-        int final_acked = 0;
-        auto start_time = std::chrono::steady_clock::now();
-        auto timeout_time = start_time + std::chrono::milliseconds(timeout_ms);
-        std::set<int> replicas_to_remove;
-        
-        while (true) {
+            
+            send_getack_to_replicas();
+            
+            int final_acked = 0;
+            auto start_time = std::chrono::steady_clock::now();
+            auto timeout_time = start_time + std::chrono::milliseconds(timeout_ms);
+            std::set<int> replicas_to_remove;
+            
+            while (true) {
+                {
+                    std::lock_guard<std::mutex> lock(wait_mutex);
+                    final_acked = acked_replicas;
+                }
+                
+                if (final_acked >= num_replicas_expected) {
+                    std::cout << "WAIT completed: " << final_acked << std::endl;
+                    break;
+                }
+                
+                auto now = std::chrono::steady_clock::now();
+                if (now >= timeout_time) {
+                    std::cout << "WAIT timed out: " << final_acked << std::endl;
+                    break;
+                }
+                
+                auto remaining_time = timeout_time - now;
+                auto remaining_us = std::chrono::duration_cast<std::chrono::microseconds>(remaining_time).count();
+                struct timeval tv;
+                tv.tv_sec = remaining_us / 1000000;
+                tv.tv_usec = remaining_us % 1000000;
+                
+                if (tv.tv_sec > 0 || tv.tv_usec > 10000) {
+                    tv.tv_sec = 0;
+                    tv.tv_usec = 10000;
+                }
+                
+                fd_set read_fds;
+                FD_ZERO(&read_fds);
+                int max_fd = -1;
+                
+                for (int fd : connected_replicas) {
+                    FD_SET(fd, &read_fds);
+                    if (fd > max_fd) max_fd = fd;
+                }
+                
+                int n = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
+                if (n < 0) {
+                    std::cerr << "select error in WAIT: " << strerror(errno) << std::endl;
+                    continue;
+                }
+                
+                replicas_to_remove.clear();
+                for (int fd : connected_replicas) {
+                    if (FD_ISSET(fd, &read_fds)) {
+                        char buffer[4096];
+                        int bytes = recv(fd, buffer, sizeof(buffer), 0);
+                        if (bytes > 0) {
+                            std::vector<std::string> cmd;
+                            parse_redis_command(std::string(buffer, bytes), cmd);
+                            execute_redis_command(fd, cmd);
+                        } else if (bytes <= 0) {
+                            std::cout << "Replica (fd: " << fd << ") disconnected during WAIT" << std::endl;
+                            replicas_to_remove.insert(fd);
+                            
+                            {
+                                std::lock_guard<std::mutex> lock(wait_mutex);
+                                if (replica_ack_offsets[fd] >= pending_wait_offset) {
+                                    acked_replicas--;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                for (int fd : replicas_to_remove) {
+                    connected_replicas.erase(fd);
+                    replica_info.erase(fd);
+                    {
+                        std::lock_guard<std::mutex> lock(wait_mutex);
+                        replica_ack_offsets.erase(fd);
+                    }
+                }
+            }
+            
             {
                 std::lock_guard<std::mutex> lock(wait_mutex);
                 final_acked = acked_replicas;
             }
             
-            if (final_acked >= num_replicas_expected) {
-                std::cout << "WAIT completed: " << final_acked << std::endl;
-                break;
-            }
-            
-            auto now = std::chrono::steady_clock::now();
-            if (now >= timeout_time) {
-                std::cout << "WAIT timed out: " << final_acked << std::endl;
-                break;
-            }
-            
-            auto remaining_time = timeout_time - now;
-            auto remaining_us = std::chrono::duration_cast<std::chrono::microseconds>(remaining_time).count();
-            struct timeval tv;
-            tv.tv_sec = remaining_us / 1000000;
-            tv.tv_usec = remaining_us % 1000000;
-            
-            if (tv.tv_sec > 0 || tv.tv_usec > 10000) {
-                tv.tv_sec = 0;
-                tv.tv_usec = 10000;
-            }
-            
-            fd_set read_fds;
-            FD_ZERO(&read_fds);
-            int max_fd = -1;
-            
-            for (int fd : connected_replicas) {
-                FD_SET(fd, &read_fds);
-                if (fd > max_fd) max_fd = fd;
-            }
-            
-            int n = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
-            if (n < 0) {
-                std::cerr << "select error in WAIT: " << strerror(errno) << std::endl;
-                continue;
-            }
-            
-            replicas_to_remove.clear();
-            for (int fd : connected_replicas) {
-                if (FD_ISSET(fd, &read_fds)) {
-                    char buffer[4096];
-                    int bytes = recv(fd, buffer, sizeof(buffer), 0);
-                    if (bytes > 0) {
-                        std::vector<std::string> cmd;
-                        parse_redis_command(std::string(buffer, bytes), cmd);
-                        execute_redis_command(fd, cmd);
-                    } else if (bytes <= 0) {
-                        std::cout << "Replica (fd: " << fd << ") disconnected during WAIT" << std::endl;
-                        replicas_to_remove.insert(fd);
-                        
-                        {
-                            std::lock_guard<std::mutex> lock(wait_mutex);
-                            if (replica_ack_offsets[fd] >= pending_wait_offset) {
-                                acked_replicas--;
+            std::string response = ":" + std::to_string(final_acked) + "\r\n";
+            send(client_fd, response.c_str(), response.length(), 0); 
+        } catch (const std::exception& e) {
+            std::cerr << "Invalid WAIT command arguments" << std::endl;
+            std::string response = "-ERR invalid arguments\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
+    } else if (command == "XADD") {
+        if (parsed_command.size() < 5 || (parsed_command.size() % 2 == 0)) {
+            std::string response = "-ERR wrong number of arguments for XADD\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+
+        std::string stream_key = parsed_command[1];
+        std::string entry_id = parsed_command[2];
+
+        if (entry_id == "*") {
+            entry_id = generate_stream_id();
+        } else {
+            size_t dash_pos = entry_id.find('-');
+            if (dash_pos != std::string::npos && entry_id.substr(dash_pos+1) == "*") {
+                std::string ms_str = entry_id.substr(0, dash_pos);
+                try {
+                    long long ms_val = std::stoll(ms_str);
+                    long long seq_val = 0;
+
+                    if (ms_val == 0) {
+                        seq_val = 1;
+                    }
+
+                    if (stream_store.find(stream_key) != stream_store.end()) {
+                        auto& entries = stream_store[stream_key].entries;
+                        if (!entries.empty()) {
+                            const auto& last_entry = entries.back();
+                            long long last_ms, last_seq;
+                            if (parse_stream_id(last_entry.id, last_ms, last_seq) && last_ms == ms_val) {
+                                seq_val = std::max(seq_val, last_seq + 1);
                             }
                         }
                     }
-                }
-            }
-            
-            for (int fd : replicas_to_remove) {
-                connected_replicas.erase(fd);
-                replica_info.erase(fd);
-                {
-                    std::lock_guard<std::mutex> lock(wait_mutex);
-                    replica_ack_offsets.erase(fd);
+
+                    entry_id = ms_str + "-" + std::to_string(seq_val);
+                } catch (...) {
+                    std::string response = "-ERR Invalid ID format for milliseconds part\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                    return;
                 }
             }
         }
-        
-        {
-            std::lock_guard<std::mutex> lock(wait_mutex);
-            final_acked = acked_replicas;
-        }
-        
-        std::string response = ":" + std::to_string(final_acked) + "\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        
-    } catch (const std::exception& e) {
-        std::cerr << "Invalid WAIT command arguments" << std::endl;
-        std::string response = "-ERR invalid arguments\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-    }
-    } else if (command == "XADD") {
-    if (parsed_command.size() < 5 || (parsed_command.size() % 2 == 0)) {
-        std::string response = "-ERR wrong number of arguments for XADD\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        return;
-    }
-
-    std::string stream_key = parsed_command[1];
-    std::string entry_id = parsed_command[2];
-
-    if (entry_id == "*") {
-        entry_id = generate_stream_id();
-    } else {
-        size_t dash_pos = entry_id.find('-');
-        if (dash_pos != std::string::npos && entry_id.substr(dash_pos+1) == "*") {
-            std::string ms_str = entry_id.substr(0, dash_pos);
-            try {
-                long long ms_val = std::stoll(ms_str);
-                long long seq_val = 0;
-
-                if (ms_val == 0) {
-                    seq_val = 1;
-                }
-
-                if (stream_store.find(stream_key) != stream_store.end()) {
-                    auto& entries = stream_store[stream_key].entries;
-                    if (!entries.empty()) {
-                        const auto& last_entry = entries.back();
-                        long long last_ms, last_seq;
-                        if (parse_stream_id(last_entry.id, last_ms, last_seq) && last_ms == ms_val) {
-                            seq_val = std::max(seq_val, last_seq + 1);
-                        }
-                    }
-                }
-
-                entry_id = ms_str + "-" + std::to_string(seq_val);
-            } catch (...) {
-                std::string response = "-ERR Invalid ID format for milliseconds part\r\n";
-                send(client_fd, response.c_str(), response.length(), 0);
-                return;
-            }
-        }
-    }
 
     long long ms, seq;
     if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
@@ -950,10 +949,8 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         queued_commands.erase(client_fd);
     }
     
-    // Always return an array response
     std::string response = "*" + std::to_string(commands.size()) + "\r\n";
     
-    // Execute each command and generate appropriate responses
     for (const auto& cmd : commands) {
         if (cmd.empty()) {
             response += "+OK\r\n";
@@ -962,7 +959,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         
         std::string command_name = cmd[0];
         
-        // Handle each command type and generate the appropriate response
         if (command_name == "SET" && (cmd.size() == 3 || cmd.size() == 5)) {
             std::string key = cmd[1];
             std::string value = cmd[2];
@@ -993,7 +989,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 }
             }
             
-            // Propagate to replicas if this client is not a replica
             if (connected_replicas.find(client_fd) == connected_replicas.end()) {
                 propagate_to_replicas(cmd);
             }
@@ -1031,13 +1026,11 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 response += ":1\r\n";
             }
             
-            // Propagate to replicas if this client is not a replica
             if (connected_replicas.find(client_fd) == connected_replicas.end()) {
                 propagate_to_replicas(cmd);
             }
             
         } else {
-            // For any other command, return OK (this is a simplified approach)
             response += "+OK\r\n";
         }
     }
@@ -1052,6 +1045,28 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             queued_commands[client_fd].clear();
         }
     }
+    std::string response = "+OK\r\n";
+    send(client_fd, response.c_str(), response.length(), 0);
+} else if (command == "DISCARD" && parsed_command.size() == 1) {
+    {
+        std::lock_guard<std::mutex> lock(multi_mutex);
+        if (clients_in_multi.find(client_fd) == clients_in_multi.end()) {
+            // Client is not in MULTI mode
+            std::string response = "-ERR DISCARD without MULTI\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+        // Remove client from MULTI mode
+        clients_in_multi.erase(client_fd);
+    }
+    
+    // Clear all queued commands for this client
+    {
+        std::lock_guard<std::mutex> qlock(queue_mutex);
+        queued_commands.erase(client_fd);
+    }
+    
+    // Send OK response
     std::string response = "+OK\r\n";
     send(client_fd, response.c_str(), response.length(), 0);
 } else {
