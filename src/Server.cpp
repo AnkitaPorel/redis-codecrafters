@@ -487,32 +487,38 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
     // Handle partial IDs (e.g., "0-*")
     else {
-        size_t dash_pos = entry_id.find('-');
-        if (dash_pos != std::string::npos && entry_id.substr(dash_pos+1) == "*") {
-            std::string ms_str = entry_id.substr(0, dash_pos);
-            try {
-                long long ms_val = std::stoll(ms_str);
-                long long seq_val = 0;
+    size_t dash_pos = entry_id.find('-');
+    if (dash_pos != std::string::npos && entry_id.substr(dash_pos+1) == "*") {
+        std::string ms_str = entry_id.substr(0, dash_pos);
+        try {
+            long long ms_val = std::stoll(ms_str);
+            long long seq_val = 0;
 
-                // Find next sequence number if stream exists
-                if (stream_store.find(stream_key) != stream_store.end()) {
-                    auto& entries = stream_store[stream_key].entries;
-                    if (!entries.empty()) {
-                        const auto& last_entry = entries.back();
-                        long long last_ms, last_seq;
-                        if (parse_stream_id(last_entry.id, last_ms, last_seq) && last_ms == ms_val) {
-                            seq_val = last_seq + 1;
-                        }
+            // Special case: if ms_val is 0, seq_val must be at least 1
+            if (ms_val == 0) {
+                seq_val = 1;
+            }
+
+            // Find next sequence number if stream exists
+            if (stream_store.find(stream_key) != stream_store.end()) {
+                auto& entries = stream_store[stream_key].entries;
+                if (!entries.empty()) {
+                    const auto& last_entry = entries.back();
+                    long long last_ms, last_seq;
+                    if (parse_stream_id(last_entry.id, last_ms, last_seq) && last_ms == ms_val) {
+                        // If we have entries with the same millisecond, increment sequence
+                        seq_val = std::max(seq_val, last_seq + 1);
                     }
                 }
-
-                entry_id = ms_str + "-" + std::to_string(seq_val);
-            } catch (...) {
-                std::string response = "-ERR Invalid ID format for milliseconds part\r\n";
-                send(client_fd, response.c_str(), response.length(), 0);
-                return;
             }
+
+            entry_id = ms_str + "-" + std::to_string(seq_val);
+        } catch (...) {
+            std::string response = "-ERR Invalid ID format for milliseconds part\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
         }
+    }
     }
 
     // Create stream if needed
