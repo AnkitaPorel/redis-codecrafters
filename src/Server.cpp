@@ -472,16 +472,19 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send(client_fd, response.c_str(), response.length(), 0);
     }
     } else if (command == "XADD") {
-    // Minimum 4 args: XADD, stream, ID, at least one field-value pair
-    // Must have even number of arguments (XADD + stream + ID + field-value pairs)
-    if (parsed_command.size() < 4 || (parsed_command.size() % 2 != 0)) {
-        std::string response = "-ERR wrong number of arguments for XADD\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        return;
-    }
+        if (parsed_command.size() < 5 || (parsed_command.size() % 2 == 0)) {
+            std::string response = "-ERR wrong number of arguments for XADD\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+        if (parsed_command.size() < 4 || (parsed_command.size() % 2 != 0)) {
+            std::string response = "-ERR wrong number of arguments for XADD\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
 
-    std::string stream_key = parsed_command[1];
-    std::string entry_id = parsed_command[2];
+        std::string stream_key = parsed_command[1];
+        std::string entry_id = parsed_command[2];
 
     // Create stream if it doesn't exist
     if (stream_store.find(stream_key) == stream_store.end()) {
@@ -925,7 +928,7 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         }
     } else if (command == "PING") {
         std::cout << "Replica: Received PING" << std::endl;
-    } else if (command == "XADD" && parsed_command.size() >= 4 && (parsed_command.size() % 2 == 0)) {
+    } else if (command == "XADD" && parsed_command.size() >= 5 && (parsed_command.size() % 2 == 1)) {
         std::string stream_key = parsed_command[1];
         std::string entry_id = parsed_command[2];
         
