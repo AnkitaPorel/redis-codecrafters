@@ -528,24 +528,31 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     // Validate ID format
     long long ms, seq;
-    if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
-        std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        return;
-    }
+if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
+    std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+    send(client_fd, response.c_str(), response.length(), 0);
+    return;
+}
 
-    // Check ID ordering
-    if (!stream_store[stream_key].entries.empty()) {
-        const auto& last_entry = stream_store[stream_key].entries.back();
-        long long last_ms, last_seq;
-        if (parse_stream_id(last_entry.id, last_ms, last_seq)) {
-            if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
-                std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-                send(client_fd, response.c_str(), response.length(), 0);
-                return;
-            }
+// Check for 0-0 specifically (invalid ID)
+if (ms == 0 && seq == 0) {
+    std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+    send(client_fd, response.c_str(), response.length(), 0);
+    return;
+}
+
+// Check ID ordering against existing entries
+if (!stream_store[stream_key].entries.empty()) {
+    const auto& last_entry = stream_store[stream_key].entries.back();
+    long long last_ms, last_seq;
+    if (parse_stream_id(last_entry.id, last_ms, last_seq)) {
+        if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
+            std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
         }
     }
+}
 
     // Create new entry
     StreamEntry new_entry(entry_id);
