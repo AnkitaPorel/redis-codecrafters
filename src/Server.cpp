@@ -768,11 +768,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
-    if (block_time >= 0 && (ids_start - keys_start) != 1) {
-        send(client_fd, "-ERR BLOCK option is only supported for a single stream\r\n", 56, 0);
-        return;
-    }
-
     // Process each stream
     std::vector<std::pair<std::string, std::string>> streams;
     for (size_t i = keys_start; i < ids_start; i++) {
@@ -788,7 +783,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         auto stream_it = stream_store.find(stream_key);
         if (stream_it == stream_store.end()) continue;
 
-        // Handle $ ID
+        std::string original_start_id = start_id;  // Keep track of original ID
+        
+        // Handle $ ID - get the last entry ID to wait for newer entries
         if (start_id == "$") {
             if (!stream_it->second.entries.empty()) {
                 start_id = stream_it->second.entries.back().id;
@@ -810,12 +807,14 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
         }
 
-        // Find matching entries
+        // Find matching entries (entries AFTER the specified ID)
         std::vector<const StreamEntry*> matches;
         for (const auto& entry : stream_it->second.entries) {
             long long entry_ms, entry_seq;
             if (!parse_stream_id(entry.id, entry_ms, entry_seq)) continue;
 
+            // For blocking with $, we want entries added AFTER the current last entry
+            // For regular IDs, we want entries with IDs greater than the specified ID
             if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
                 matches.push_back(&entry);
             }
@@ -841,8 +840,8 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
 
-    // If block_time is 0, return immediately with available data or *-1
-    if (block_time == 0) {
+    // If we have data or not blocking, return immediately
+    if (has_data || block_time < 0) {
         if (has_data) {
             std::string final_response = "*" + std::to_string(responses.size()) + "\r\n";
             for (const auto& resp : responses) {
@@ -855,51 +854,48 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
-    // Handle blocking case for non-zero block_time
-    if (has_data) {
-        std::string final_response = "*" + std::to_string(responses.size()) + "\r\n";
-        for (const auto& resp : responses) {
-            final_response += resp;
-        }
-        send(client_fd, final_response.c_str(), final_response.length(), 0);
+    // Handle blocking case (block_time >= 0 and no immediate data)
+    if (block_time == 0) {
+        // Block indefinitely - not handled in this simple implementation
+        send(client_fd, "*-1\r\n", 5, 0);
         return;
     }
 
-    // Add to blocked clients for non-zero block_time
-    if (block_time > 0) {
-        if (streams.size() != 1) {
-            send(client_fd, "-ERR BLOCK option is only supported for a single stream\r\n", 56, 0);
-            return;
-        }
-
-        auto& [stream_key, last_id] = streams[0];
-        
-        // Handle $ for blocking
-        if (last_id == "$") {
-            auto stream_it = stream_store.find(stream_key);
-            if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
-                last_id = stream_it->second.entries.back().id;
-            } else {
-                last_id = "0-0";
-            }
-        }
-
-        // Add to blocked clients
-        BlockedClient client;
-        client.fd = client_fd;
-        client.stream_key = stream_key;
-        client.last_id = last_id;
-        client.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_time);
-
-        {
-            std::lock_guard<std::mutex> lock(blocked_clients_mutex);
-            blocked_clients.push_back(client);
-        }
-        
+    // Add to blocked clients for positive block_time
+    if (streams.size() != 1) {
+        send(client_fd, "-ERR BLOCK option is only supported for a single stream\r\n", 56, 0);
         return;
     }
 
-    send(client_fd, "*-1\r\n", 5, 0);
+    auto& [stream_key, last_id] = streams[0];
+    
+    // For blocking, we need to store the last ID we've seen
+    std::string blocking_last_id = last_id;
+    if (last_id == "$") {
+        auto stream_it = stream_store.find(stream_key);
+        if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
+            blocking_last_id = stream_it->second.entries.back().id;
+        } else {
+            blocking_last_id = "0-0";
+        }
+    }
+
+    // Add to blocked clients
+    BlockedClient client;
+    client.fd = client_fd;
+    client.stream_key = stream_key;
+    client.last_id = blocking_last_id;
+    client.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_time);
+
+    {
+        std::lock_guard<std::mutex> lock(blocked_clients_mutex);
+        blocked_clients.push_back(client);
+        std::cout << "XREAD: Blocking client fd=" << client_fd 
+                  << " on stream '" << stream_key 
+                  << "' with last_id '" << blocking_last_id << "'" << std::endl;
+    }
+    
+    // Don't send response here - client will be unblocked by XADD or timeout
 } else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
