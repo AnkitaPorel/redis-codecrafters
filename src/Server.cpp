@@ -956,41 +956,29 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     } else {
         std::string response = "*" + std::to_string(commands.size()) + "\r\n";
         
-        // Create a buffer to capture command outputs
-        std::vector<std::string> command_responses;
+        // Temporarily redirect stdout to capture command outputs
+        int saved_stdout = dup(STDOUT_FILENO);
+        int pipefd[2];
+        pipe(pipefd);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
         
+        // Execute each command and capture output
         for (const auto& cmd : commands) {
-            // Create a temporary string stream to capture output
-            std::stringstream output;
-            int saved_stdout = dup(1); // Save stdout
-            int pipefd[2];
-            pipe(pipefd);
-            dup2(pipefd[1], 1); // Redirect stdout to pipe
-            close(pipefd[1]);
-            
-            // Execute the command
             execute_redis_command(client_fd, cmd);
-            
-            // Restore stdout
-            dup2(saved_stdout, 1);
-            close(saved_stdout);
             
             // Read from pipe
             char buffer[4096];
-            ssize_t bytes_read;
-            std::string cmd_output;
-            while ((bytes_read = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
-                cmd_output.append(buffer, bytes_read);
+            ssize_t bytes_read = read(pipefd[0], buffer, sizeof(buffer));
+            if (bytes_read > 0) {
+                response.append(buffer, bytes_read);
             }
-            close(pipefd[0]);
-            
-            command_responses.push_back(cmd_output);
         }
         
-        // Build the final response
-        for (const auto& resp : command_responses) {
-            response += resp;
-        }
+        // Restore stdout
+        dup2(saved_stdout, STDOUT_FILENO);
+        close(saved_stdout);
+        close(pipefd[0]);
         
         send(client_fd, response.c_str(), response.length(), 0);
     }
