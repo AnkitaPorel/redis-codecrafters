@@ -763,7 +763,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
-    for (auto& [stream_key, start_id] : streams) {
+    for (auto& [stream_key, start_id] : stream) {
         auto stream_it = stream_store.find(stream_key);
         if (stream_it == stream_store.end()) continue;
 
@@ -930,7 +930,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                   << " on stream '" << stream_key 
                   << "' with last_id '" << blocking_last_id << "'" << std::endl;
     }
-} else if (command == "TYPE" && parsed_command.size() == 2) {
+}} else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
     
@@ -961,7 +961,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
-}
+
 
 std::string execute_replica_command(const std::vector<std::string>& parsed_command, int bytes_processed) {
     std::string response;
