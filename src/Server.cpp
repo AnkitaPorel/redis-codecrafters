@@ -481,22 +481,64 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::string stream_key = parsed_command[1];
     std::string entry_id = parsed_command[2];
 
-    // Handle auto-generated ID case
+    // Handle auto-generated IDs
     if (entry_id == "*") {
         entry_id = generate_stream_id();
     }
+    // Handle partial IDs (e.g., "0-*")
+    else {
+        size_t dash_pos = entry_id.find('-');
+        if (dash_pos != std::string::npos && entry_id.substr(dash_pos+1) == "*") {
+            std::string ms_str = entry_id.substr(0, dash_pos);
+            try {
+                long long ms_val = std::stoll(ms_str);
+                long long seq_val = 0;
 
-    // Create stream if it doesn't exist
+                // Find next sequence number if stream exists
+                if (stream_store.find(stream_key) != stream_store.end()) {
+                    auto& entries = stream_store[stream_key].entries;
+                    if (!entries.empty()) {
+                        const auto& last_entry = entries.back();
+                        long long last_ms, last_seq;
+                        if (parse_stream_id(last_entry.id, last_ms, last_seq) && last_ms == ms_val) {
+                            seq_val = last_seq + 1;
+                        }
+                    }
+                }
+
+                entry_id = ms_str + "-" + std::to_string(seq_val);
+            } catch (...) {
+                std::string response = "-ERR Invalid ID format for milliseconds part\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+        }
+    }
+
+    // Create stream if needed
     if (stream_store.find(stream_key) == stream_store.end()) {
         stream_store[stream_key] = StreamData();
     }
 
-    // Validate the ID format
+    // Validate ID format
     long long ms, seq;
     if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
         std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
+    }
+
+    // Check ID ordering
+    if (!stream_store[stream_key].entries.empty()) {
+        const auto& last_entry = stream_store[stream_key].entries.back();
+        long long last_ms, last_seq;
+        if (parse_stream_id(last_entry.id, last_ms, last_seq)) {
+            if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
+                std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+        }
     }
 
     // Create new entry
