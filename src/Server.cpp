@@ -481,7 +481,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::string stream_key = parsed_command[1];
     std::string entry_id = parsed_command[2];
 
-    // Handle auto-generated IDs
     if (entry_id == "*") {
         entry_id = generate_stream_id();
     } else {
@@ -492,12 +491,10 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 long long ms_val = std::stoll(ms_str);
                 long long seq_val = 0;
 
-                // Special case: if ms_val is 0, seq_val must be at least 1
                 if (ms_val == 0) {
                     seq_val = 1;
                 }
 
-                // Find next sequence number if stream exists
                 if (stream_store.find(stream_key) != stream_store.end()) {
                     auto& entries = stream_store[stream_key].entries;
                     if (!entries.empty()) {
@@ -518,7 +515,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
 
-    // Validate ID format
     long long ms, seq;
     if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
         std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
@@ -526,14 +522,12 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
-    // Check for 0-0 specifically (invalid ID)
     if (ms == 0 && seq == 0) {
         std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
 
-    // Check ID ordering against existing entries
     if (!stream_store[stream_key].entries.empty()) {
         const auto& last_entry = stream_store[stream_key].entries.back();
         long long last_ms, last_seq;
@@ -546,22 +540,18 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
 
-    // Create stream if needed
     if (stream_store.find(stream_key) == stream_store.end()) {
         stream_store[stream_key] = StreamData();
     }
 
-    // Create new entry
     StreamEntry new_entry(entry_id);
     for (size_t i = 3; i < parsed_command.size(); i += 2) {
         if (i + 1 >= parsed_command.size()) break;
         new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
     }
 
-    // Add to stream
     stream_store[stream_key].entries.push_back(new_entry);
 
-    // Return the entry ID
     std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
     send(client_fd, response.c_str(), response.length(), 0);
 
@@ -583,7 +573,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         if (entry_parsed && last_parsed) {
             should_unblock = (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq));
         } else if (it->last_id == "$") {
-            // For $ ID, always unblock for new entries
             should_unblock = true;
         }
 
@@ -599,7 +588,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     std::cout << "XADD: Will unblock " << to_unblock.size() << " clients" << std::endl;
 
-    // Respond to unblocked clients
     for (const auto& client : to_unblock) {
         std::string unblock_response = "*1\r\n*2\r\n";
         unblock_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
@@ -616,7 +604,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send(client.fd, unblock_response.c_str(), unblock_response.length(), 0);
     }
 
-    // Propagate to replicas if this isn't a replica connection
     if (connected_replicas.find(client_fd) == connected_replicas.end()) {
         propagate_to_replicas(parsed_command);
     }
@@ -635,7 +622,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     long long start_ms = 0, start_seq = 0;
     if (start_id == "-") {
-        // Special case: start from the beginning of the stream
         start_ms = 0;
         start_seq = 0;
     } else {
@@ -725,7 +711,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::vector<std::string> responses;
     bool has_data = false;
 
-    // Check for BLOCK option
     if (parsed_command.size() > 2) {
         std::string second_arg = parsed_command[1];
         std::transform(second_arg.begin(), second_arg.end(), second_arg.begin(), ::toupper);
@@ -744,7 +729,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
 
-    // Verify STREAMS keyword
     if (parsed_command.size() <= streams_pos) {
         send(client_fd, "-ERR syntax error, STREAMS keyword expected\r\n", 44, 0);
         return;
@@ -757,7 +741,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
-    // Get keys and IDs
     size_t keys_start = streams_pos + 1;
     size_t ids_start = keys_start + (parsed_command.size() - keys_start) / 2;
 
@@ -766,12 +749,10 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
-    // Populate streams vector
     for (size_t i = keys_start; i < ids_start; i++) {
         std::string stream_key = parsed_command[i];
         std::string start_id = parsed_command[i + (ids_start - keys_start)];
         
-        // Handle $ special case
         if (start_id == "$") {
             auto stream_it = stream_store.find(stream_key);
             if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
@@ -784,7 +765,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         streams.emplace_back(stream_key, start_id);
     }
 
-    // Check for existing entries
     for (auto& stream : streams) {
         auto& stream_key = stream.first;
         auto& start_id = stream.second;
@@ -792,7 +772,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         auto stream_it = stream_store.find(stream_key);
         if (stream_it == stream_store.end()) continue;
 
-        // Parse the start ID
         long long start_ms = 0, start_seq = 0;
         size_t dash_pos = start_id.find('-');
         if (dash_pos != std::string::npos) {
@@ -813,7 +792,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
         }
 
-        // Find matching entries (entries with ID > start_id)
         std::vector<const StreamEntry*> matches;
         for (const auto& entry : stream_it->second.entries) {
             long long entry_ms, entry_seq;
@@ -844,7 +822,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
 
-    // If we have data or not blocking, return immediately
     if (has_data || block_time < 0) {
         if (has_data) {
             std::string final_response = "*" + std::to_string(responses.size()) + "\r\n";
@@ -858,7 +835,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
-    // Handle blocking case (block_time >= 0 and no immediate data)
     if (streams.size() != 1) {
         send(client_fd, "-ERR BLOCK option is only supported for a single stream\r\n", 56, 0);
         return;
@@ -917,7 +893,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     auto it = kv_store.find(key);
     
     if (it != kv_store.end()) {
-        // Check if value is a number
+        // Key exists - check if value is a number
         try {
             long long value = std::stoll(it->second.value);
             value++;
@@ -934,9 +910,15 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             send(client_fd, response.c_str(), response.length(), 0);
         }
     } else {
-        // Key doesn't exist - we'll handle this in later stages
-        std::string response = "-ERR key not found\r\n";
+        // Key doesn't exist - set to 1
+        kv_store[key] = ValueEntry("1");
+        
+        std::string response = ":1\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
+        
+        if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+            propagate_to_replicas(parsed_command);
+        }
     }
 } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
@@ -1321,15 +1303,12 @@ void handle_master_connection() {
 }
 
 int main(int argc, char **argv) {
-    // Enable line buffering for cout/cerr
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
-    // Set up signal handling for graceful shutdown
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
 
-    // Parse command line arguments
     for (int i = 1; i < argc; i += 2) {
         std::string arg = argv[i];
         if (i + 1 < argc) {
@@ -1375,10 +1354,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Start the blocked clients timeout thread
     std::thread timeout_thread(check_blocked_clients_timeout);
 
-    // Print startup message
     if (is_replica) {
         std::cout << "Starting Redis replica server on port " << server_port 
                   << " (master: " << master_host << ":" << master_port << ")" << std::endl;
@@ -1386,16 +1363,13 @@ int main(int argc, char **argv) {
         std::cout << "Starting Redis master server on port " << server_port << std::endl;
     }
 
-    // Load RDB file if configured
     load_rdb_file();
 
-    // If in replica mode, start master connection thread
     if (is_replica) {
         std::thread master_connection_thread(handle_master_connection);
         master_connection_thread.detach();
     }
 
-    // Create server socket
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         std::cerr << "Failed to create server socket: " << strerror(errno) << std::endl;
@@ -1404,7 +1378,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Set socket options
     int reuse = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
         std::cerr << "setsockopt failed: " << strerror(errno) << std::endl;
@@ -1414,7 +1387,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Bind socket to port
     struct sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
@@ -1428,8 +1400,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Start listening
-    int connection_backlog = 128;  // Increased from 5 for better handling of connection bursts
+    int connection_backlog = 128;
     if (listen(server_fd, connection_backlog) < 0) {
         std::cerr << "listen failed: " << strerror(errno) << std::endl;
         close(server_fd);
@@ -1440,13 +1411,11 @@ int main(int argc, char **argv) {
 
     std::cout << "Server started successfully. Waiting for connections on port " << server_port << std::endl;
 
-    // Main server loop
     fd_set read_fds;
     std::vector<int> client_fds;
     struct timeval tv;
 
     while (!shutdown_server) {
-        // Set up select timeout (1 second)
         tv.tv_sec = 1;
         tv.tv_usec = 0;
 
@@ -1454,7 +1423,6 @@ int main(int argc, char **argv) {
         FD_SET(server_fd, &read_fds);
         int max_fd = server_fd;
 
-        // Add all client fds to the set
         for (int fd : client_fds) {
             FD_SET(fd, &read_fds);
             if (fd > max_fd) {
@@ -1462,7 +1430,6 @@ int main(int argc, char **argv) {
             }
         }
 
-        // Wait for activity
         int activity = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
         
         if (activity < 0 && errno != EINTR) {
@@ -1474,7 +1441,6 @@ int main(int argc, char **argv) {
             break;
         }
 
-        // Check for new connections
         if (FD_ISSET(server_fd, &read_fds)) {
             struct sockaddr_in client_addr;
             socklen_t client_len = sizeof(client_addr);
@@ -1487,7 +1453,6 @@ int main(int argc, char **argv) {
                 continue;
             }
 
-            // Set non-blocking mode for the client socket
             int flags = fcntl(client_fd, F_GETFL, 0);
             fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
 
@@ -1495,7 +1460,6 @@ int main(int argc, char **argv) {
             client_fds.push_back(client_fd);
         }
 
-        // Check for client activity
         for (auto it = client_fds.begin(); it != client_fds.end(); ) {
             int client_fd = *it;
             
@@ -1504,14 +1468,12 @@ int main(int argc, char **argv) {
     ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
     if (bytes_received <= 0) {
-        // Client disconnected or error occurred
         if (bytes_received == 0) {
             std::cout << "Client (fd: " << client_fd << ") disconnected" << std::endl;
         } else {
             std::cerr << "recv error from client (fd: " << client_fd << "): " << strerror(errno) << std::endl;
         }
 
-        // Clean up client resources
         {
             std::lock_guard<std::mutex> lock(blocked_clients_mutex);
             blocked_clients.erase(
@@ -1532,7 +1494,6 @@ int main(int argc, char **argv) {
         continue;
     }
 
-    // Process received data
     buffer[bytes_received] = '\0';
     std::cout << "Received from client (fd: " << client_fd << ") [" << bytes_received << " bytes]: ";
     for (ssize_t i = 0; i < bytes_received; ++i) {
@@ -1559,10 +1520,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Cleanup - Graceful shutdown
     std::cout << "Shutting down server..." << std::endl;
 
-    // Close all client connections
     {
         std::lock_guard<std::mutex> lock(blocked_clients_mutex);
         for (const auto& client : blocked_clients) {
@@ -1575,12 +1534,10 @@ int main(int argc, char **argv) {
         close(fd);
     }
 
-    // Close server socket
     if (server_fd >= 0) {
         close(server_fd);
     }
 
-    // Wait for timeout thread to finish
     timeout_thread.join();
 
     std::cout << "Server shutdown complete" << std::endl;
