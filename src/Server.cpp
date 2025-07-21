@@ -528,76 +528,76 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
         }
 
-    long long ms, seq;
-    if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
-        std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        return;
-    }
+        long long ms, seq;
+        if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
+            std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
 
-    if (ms == 0 && seq == 0) {
-        std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        return;
-    }
+        if (ms == 0 && seq == 0) {
+            std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
 
-    if (!stream_store[stream_key].entries.empty()) {
-        const auto& last_entry = stream_store[stream_key].entries.back();
-        long long last_ms, last_seq;
-        if (parse_stream_id(last_entry.id, last_ms, last_seq)) {
-            if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
-                std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-                send(client_fd, response.c_str(), response.length(), 0);
-                return;
+        if (!stream_store[stream_key].entries.empty()) {
+            const auto& last_entry = stream_store[stream_key].entries.back();
+            long long last_ms, last_seq;
+            if (parse_stream_id(last_entry.id, last_ms, last_seq)) {
+                if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
+                    std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                    return;
+                }
             }
         }
-    }
 
-    if (stream_store.find(stream_key) == stream_store.end()) {
-        stream_store[stream_key] = StreamData();
-    }
-
-    StreamEntry new_entry(entry_id);
-    for (size_t i = 3; i < parsed_command.size(); i += 2) {
-        if (i + 1 >= parsed_command.size()) break;
-        new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
-    }
-
-    stream_store[stream_key].entries.push_back(new_entry);
-
-    std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
-    send(client_fd, response.c_str(), response.length(), 0);
-
-    std::vector<BlockedClient> to_unblock;
-    {
-        std::lock_guard<std::mutex> lock(blocked_clients_mutex);
-        std::cout << "XADD: Added entry " << entry_id << " to stream " << stream_key << std::endl;
-        std::cout << "XADD: Checking " << blocked_clients.size() << " blocked clients" << std::endl;
-
-        for (auto it = blocked_clients.begin(); it != blocked_clients.end();) {
-    if (it->stream_key == stream_key) {
-        long long entry_ms, entry_seq;
-        long long last_ms, last_seq;
-
-        bool entry_parsed = parse_stream_id(entry_id, entry_ms, entry_seq);
-        bool last_parsed = parse_stream_id(it->last_id, last_ms, last_seq);
-
-        bool should_unblock = false;
-        if (entry_parsed && last_parsed) {
-            should_unblock = (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq));
-        } else if (it->last_id == "$") {
-            should_unblock = true;
+        if (stream_store.find(stream_key) == stream_store.end()) {
+            stream_store[stream_key] = StreamData();
         }
 
-        if (should_unblock) {
-            to_unblock.push_back(*it);
-            it = blocked_clients.erase(it);
-            continue;
+        StreamEntry new_entry(entry_id);
+        for (size_t i = 3; i < parsed_command.size(); i += 2) {
+            if (i + 1 >= parsed_command.size()) break;
+            new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
         }
-    }
-    ++it;
-}
-    }
+
+        stream_store[stream_key].entries.push_back(new_entry);
+
+        std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+
+        std::vector<BlockedClient> to_unblock;
+        {
+            std::lock_guard<std::mutex> lock(blocked_clients_mutex);
+            std::cout << "XADD: Added entry " << entry_id << " to stream " << stream_key << std::endl;
+            std::cout << "XADD: Checking " << blocked_clients.size() << " blocked clients" << std::endl;
+
+            for (auto it = blocked_clients.begin(); it != blocked_clients.end();) {
+                if (it->stream_key == stream_key) {
+                    long long entry_ms, entry_seq;
+                    long long last_ms, last_seq;
+
+                    bool entry_parsed = parse_stream_id(entry_id, entry_ms, entry_seq);
+                    bool last_parsed = parse_stream_id(it->last_id, last_ms, last_seq);
+
+                    bool should_unblock = false;
+                    if (entry_parsed && last_parsed) {
+                        should_unblock = (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq));
+                    } else if (it->last_id == "$") {
+                        should_unblock = true;
+                    }
+
+                    if (should_unblock) {
+                        to_unblock.push_back(*it);
+                        it = blocked_clients.erase(it);
+                        continue;
+                    }
+                }
+                ++it;
+            }
+        }
 
     std::cout << "XADD: Will unblock " << to_unblock.size() << " clients" << std::endl;
 
@@ -1051,22 +1051,16 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     {
         std::lock_guard<std::mutex> lock(multi_mutex);
         if (clients_in_multi.find(client_fd) == clients_in_multi.end()) {
-            // Client is not in MULTI mode
             std::string response = "-ERR DISCARD without MULTI\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
             return;
         }
-        // Remove client from MULTI mode
         clients_in_multi.erase(client_fd);
+        {
+            std::lock_guard<std::mutex> qlock(queue_mutex);
+            queued_commands[client_fd].clear();
+        }
     }
-    
-    // Clear all queued commands for this client
-    {
-        std::lock_guard<std::mutex> qlock(queue_mutex);
-        queued_commands.erase(client_fd);
-    }
-    
-    // Send OK response
     std::string response = "+OK\r\n";
     send(client_fd, response.c_str(), response.length(), 0);
 } else {
