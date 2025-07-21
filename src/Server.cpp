@@ -770,17 +770,7 @@ if (!stream_store[stream_key].entries.empty()) {
     for (size_t i = keys_start; i < ids_start; i++) {
         std::string id = parsed_command[i + (ids_start - keys_start)];
         
-        // Handle $ symbol - replace with latest ID if stream exists
-        if (id == "$") {
-            auto stream_it = stream_store.find(parsed_command[i]);
-            if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
-                id = stream_it->second.entries.back().id;
-            } else {
-                // If stream doesn't exist or is empty, use "0-0" as the starting point
-                id = "0-0";
-            }
-        }
-        
+        // Handle $ symbol - we'll process this specially during the search
         key_id_pairs.emplace_back(parsed_command[i], id);
     }
 
@@ -790,7 +780,7 @@ if (!stream_store[stream_key].entries.empty()) {
 
     for (const auto& pair : key_id_pairs) {
         const std::string& stream_key = pair.first;
-        const std::string& start_id = pair.second;
+        std::string start_id = pair.second;
 
         auto stream_it = stream_store.find(stream_key);
         if (stream_it == stream_store.end()) {
@@ -799,6 +789,16 @@ if (!stream_store[stream_key].entries.empty()) {
 
         const StreamData& stream = stream_it->second;
         std::vector<const StreamEntry*> matched_entries;
+
+        // Special handling for $ - use the last ID in the stream
+        if (start_id == "$") {
+            if (!stream.entries.empty()) {
+                start_id = stream.entries.back().id;
+            } else {
+                // If stream is empty, we want all future entries
+                start_id = "0-0";
+            }
+        }
 
         long long start_ms = 0, start_seq = 0;
         if (start_id == "-") {
@@ -880,8 +880,12 @@ if (!stream_store[stream_key].entries.empty()) {
         // Determine the last ID to use for blocking
         std::string last_id = key_id_pairs[0].second;
         auto stream_it = stream_store.find(key_id_pairs[0].first);
-        if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
-            last_id = stream_it->second.entries.back().id;
+        if (last_id == "$") {
+            if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
+                last_id = stream_it->second.entries.back().id;
+            } else {
+                last_id = "0-0";
+            }
         }
 
         // Add to blocked clients list
