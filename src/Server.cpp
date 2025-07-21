@@ -823,22 +823,26 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::string stream_key = parsed_command[1];
     std::string entry_id = parsed_command[2];
     
+    // Create stream if it doesn't exist
     if (stream_store.find(stream_key) == stream_store.end()) {
         stream_store[stream_key] = StreamData();
     }
 
+    // Create new stream entry
     StreamEntry new_entry(entry_id);
     for (size_t i = 3; i < parsed_command.size(); i += 2) {
         if (i + 1 >= parsed_command.size()) break;
         new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
     }
 
+    // Add entry to stream
     stream_store[stream_key].entries.push_back(new_entry);
 
+    // Send response with the entry ID
     std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
     send(client_fd, response.c_str(), response.length(), 0);
 
-    // Notify blocked clients
+    // Notify blocked clients (if any)
     std::vector<BlockedClient> to_unblock;
     {
         std::lock_guard<std::mutex> lock(blocked_clients_mutex);
@@ -862,19 +866,20 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     
     // Respond to unblocked clients
     for (const auto& client : to_unblock) {
-        std::string response = "*1\r\n*2\r\n";
-        response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
-        response += "*1\r\n*2\r\n";
-        response += "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
-        response += "*" + std::to_string(new_entry.fields.size() * 2) + "\r\n";
+        std::string unblock_response = "*1\r\n*2\r\n";
+        unblock_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
+        unblock_response += "*1\r\n*2\r\n";
+        unblock_response += "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
+        unblock_response += "*" + std::to_string(new_entry.fields.size() * 2) + "\r\n";
         for (const auto& field : new_entry.fields) {
-            response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
-            response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
+            unblock_response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
+            unblock_response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
         }
         
-        send(client.fd, response.c_str(), response.length(), 0);
+        send(client.fd, unblock_response.c_str(), unblock_response.length(), 0);
     }
     
+    // Propagate to replicas if this isn't a replica connection
     if (connected_replicas.find(client_fd) == connected_replicas.end()) {
         propagate_to_replicas(parsed_command);
     }
