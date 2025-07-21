@@ -659,9 +659,10 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "XREAD") {
-        int block_time = -1;
-        size_t streams_pos = 1;
-    
+    int block_time = -1;
+    size_t streams_pos = 1;
+
+    // Check for BLOCK option
     if (parsed_command.size() > 2 && parsed_command[1] == "BLOCK") {
         try {
             block_time = std::stoi(parsed_command[2]);
@@ -670,56 +671,60 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 send(client_fd, response.c_str(), response.length(), 0);
                 return;
             }
-            streams_pos = 4;
+            streams_pos = 3; // Adjust to account for BLOCK and timeout
         } catch (...) {
             std::string response = "-ERR invalid timeout value\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
             return;
         }
     }
-    
+
+    // Verify STREAMS keyword
     if (parsed_command.size() <= streams_pos || parsed_command[streams_pos] != "STREAMS") {
         std::string response = "-ERR syntax error, STREAMS keyword expected\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
-    
+
+    // Calculate positions for keys and IDs
     size_t keys_start = streams_pos + 1;
     size_t ids_start = keys_start + (parsed_command.size() - keys_start) / 2;
-    
+
+    // Validate number of arguments
     if ((parsed_command.size() - keys_start) % 2 != 0 || ids_start == keys_start) {
         std::string response = "-ERR wrong number of arguments for XREAD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
-    
+
+    // For BLOCK, only one stream is supported
     if (block_time >= 0 && (ids_start - keys_start) != 1) {
         std::string response = "-ERR BLOCK option is only supported for a single stream\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
-    
+
     std::vector<std::pair<std::string, std::string>> key_id_pairs;
     for (size_t i = keys_start; i < ids_start; i++) {
         key_id_pairs.emplace_back(parsed_command[i], parsed_command[i + (ids_start - keys_start)]);
     }
-    
+
     std::string response;
     bool found_any = false;
     std::vector<std::string> stream_responses;
-    
+
     for (const auto& pair : key_id_pairs) {
         const std::string& stream_key = pair.first;
         const std::string& start_id = pair.second;
-        
+
         auto stream_it = stream_store.find(stream_key);
         if (stream_it == stream_store.end()) {
             continue;
         }
-        
+
         const StreamData& stream = stream_it->second;
         std::vector<const StreamEntry*> matched_entries;
-        
+
         long long start_ms = 0, start_seq = 0;
         if (start_id == "-") {
             start_ms = 0;
@@ -752,19 +757,20 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 continue;
             }
 
-            if (entry_ms < start_ms || (entry_ms == start_ms && entry_seq < start_seq)) {
+            // For XREAD, we want entries with ID strictly greater than start_id
+            if (entry_ms < start_ms || (entry_ms == start_ms && entry_seq <= start_seq)) {
                 continue;
             }
 
             matched_entries.push_back(&entry);
         }
-        
+
         if (!matched_entries.empty()) {
             found_any = true;
             std::string stream_response = "*2\r\n";
             stream_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
             stream_response += "*" + std::to_string(matched_entries.size()) + "\r\n";
-            
+
             for (const auto entry : matched_entries) {
                 stream_response += "*2\r\n";
                 stream_response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
@@ -776,13 +782,13 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                     stream_response += field.second + "\r\n";
                 }
             }
-            
+
             stream_responses.push_back(stream_response);
         }
     }
-    
+
     if (found_any) {
-        // We have data, send it immediately
+        // Send data immediately
         response = "*" + std::to_string(stream_responses.size()) + "\r\n";
         for (const auto& stream_resp : stream_responses) {
             response += stream_resp;
@@ -795,24 +801,24 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             send(client_fd, response.c_str(), response.length(), 0);
             return;
         }
-        
+
         // Add to blocked clients list
         BlockedClient client;
         client.fd = client_fd;
         client.stream_key = key_id_pairs[0].first;
         client.last_id = key_id_pairs[0].second;
         client.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_time);
-        
+
         {
             std::lock_guard<std::mutex> lock(blocked_clients_mutex);
             blocked_clients.push_back(client);
         }
-        
+
         // Client will be unblocked when new data arrives or timeout occurs
         return;
     } else {
         // No data and no blocking
-        response = "*0\r\n";
+        response = "$-1\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
     } else if (command == "TYPE" && parsed_command.size() == 2) {
