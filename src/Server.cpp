@@ -721,6 +721,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     } else if (command == "XREAD") {
     int block_time = -1;
     size_t streams_pos = 1;
+    std::vector<std::pair<std::string, std::string>> streams;
+    std::vector<std::string> responses;
+    bool has_data = false;
 
     // Check for BLOCK option
     if (parsed_command.size() > 2) {
@@ -763,51 +766,16 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
-    for (auto& [stream_key, start_id] : stream) {
-        auto stream_it = stream_store.find(stream_key);
-        if (stream_it == stream_store.end()) continue;
-
-        // Handle special IDs
-        if (start_id == "$") {
-            // For $, we want only new entries added after this command
-            if (stream_it->second.entries.empty()) {
-                start_id = "0-0";
-            } else {
-                start_id = stream_it->second.entries.back().id;
-            }
-        } else if (start_id == "-") {
-            // For -, we want all entries
-            std::vector<const StreamEntry*> matches;
-            for (const auto& entry : stream_it->second.entries) {
-                matches.push_back(&entry);
-            }
-
-            if (!matches.empty()) {
-                has_data = true;
-                std::string response = "*2\r\n";
-                response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
-                response += "*" + std::to_string(matches.size()) + "\r\n";
-
-                for (const auto entry : matches) {
-                    response += "*2\r\n";
-                    response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
-                    response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
-                    for (const auto& [field, value] : entry->fields) {
-                        response += "$" + std::to_string(field.length()) + "\r\n" + field + "\r\n";
-                        response += "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
-                    }
-                }
-
-                responses.push_back(response);
-            }
-            continue;
-        }
+    // Populate streams vector
+    for (size_t i = keys_start; i < ids_start; i++) {
+        streams.emplace_back(parsed_command[i], parsed_command[i + (ids_start - keys_start)]);
+    }
 
     // Check for existing entries
-    std::vector<std::string> responses;
-    bool has_data = false;
-
-    for (auto& [stream_key, start_id] : streams) {
+    for (auto& stream : streams) {
+        auto& stream_key = stream.first;
+        auto& start_id = stream.second;
+        
         auto stream_it = stream_store.find(stream_key);
         if (stream_it == stream_store.end()) continue;
 
@@ -903,7 +871,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
-    auto& [stream_key, last_id] = streams[0];
+    auto& stream = streams[0];
+    auto& stream_key = stream.first;
+    auto& last_id = stream.second;
     
     // For blocking, store the last ID we've seen
     std::string blocking_last_id = last_id;
@@ -930,7 +900,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                   << " on stream '" << stream_key 
                   << "' with last_id '" << blocking_last_id << "'" << std::endl;
     }
-}} else if (command == "TYPE" && parsed_command.size() == 2) {
+} else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
     
