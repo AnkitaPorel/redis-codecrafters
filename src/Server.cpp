@@ -688,7 +688,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     
     // Check STREAMS keyword
     if (parsed_command.size() <= streams_pos || parsed_command[streams_pos] != "STREAMS") {
-        std::string response = "-ERR wrong number of arguments for XREAD\r\n";
+        std::string response = "-ERR syntax error, STREAMS keyword expected\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
@@ -696,7 +696,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     size_t keys_start = streams_pos + 1;
     size_t ids_start = keys_start + (parsed_command.size() - keys_start) / 2;
     
-    if ((parsed_command.size() - keys_start) % 2 != 0) {
+    if ((parsed_command.size() - keys_start) % 2 != 0 || ids_start == keys_start) {
         std::string response = "-ERR wrong number of arguments for XREAD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
@@ -823,7 +823,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     } else {
         // No data and no blocking
-        response = "*-1\r\n";
+        response = "*0\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
     } else if (command == "TYPE" && parsed_command.size() == 2) {
