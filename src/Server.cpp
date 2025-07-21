@@ -819,39 +819,52 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "-ERR invalid arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
-    } else if (command == "XADD" && parsed_command.size() >= 4 && (parsed_command.size() % 2 == 0)) {
+    } else if (command == "XADD") {
+    if (parsed_command.size() < 4 || (parsed_command.size() % 2 != 0)) {
+        std::string response = "-ERR wrong number of arguments for XADD\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+
     std::string stream_key = parsed_command[1];
     std::string entry_id = parsed_command[2];
-    
+
     // Create stream if it doesn't exist
     if (stream_store.find(stream_key) == stream_store.end()) {
         stream_store[stream_key] = StreamData();
     }
 
-    // Create new stream entry
-    StreamEntry new_entry(entry_id);
+    // Validate or generate ID
+    auto [valid, final_id] = validate_or_generate_id(entry_id, stream_store[stream_key]);
+    if (!valid) {
+        std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+
+    // Create new entry
+    StreamEntry new_entry(final_id);
     for (size_t i = 3; i < parsed_command.size(); i += 2) {
         if (i + 1 >= parsed_command.size()) break;
         new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
     }
 
-    // Add entry to stream
+    // Add to stream
     stream_store[stream_key].entries.push_back(new_entry);
 
-    // Send response with the entry ID
-    std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
+    // Return the entry ID
+    std::string response = "$" + std::to_string(final_id.length()) + "\r\n" + final_id + "\r\n";
     send(client_fd, response.c_str(), response.length(), 0);
 
-    // Notify blocked clients (if any)
+    // Notify blocked clients
     std::vector<BlockedClient> to_unblock;
     {
         std::lock_guard<std::mutex> lock(blocked_clients_mutex);
         for (auto it = blocked_clients.begin(); it != blocked_clients.end();) {
             if (it->stream_key == stream_key) {
-                // Check if this entry is newer than what the client has seen
                 long long entry_ms, entry_seq;
                 long long last_ms, last_seq;
-                if (parse_stream_id(entry_id, entry_ms, entry_seq) &&
+                if (parse_stream_id(final_id, entry_ms, entry_seq) &&
                     parse_stream_id(it->last_id, last_ms, last_seq)) {
                     if (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq)) {
                         to_unblock.push_back(*it);
@@ -863,22 +876,21 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             ++it;
         }
     }
-    
+
     // Respond to unblocked clients
     for (const auto& client : to_unblock) {
         std::string unblock_response = "*1\r\n*2\r\n";
         unblock_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
         unblock_response += "*1\r\n*2\r\n";
-        unblock_response += "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
+        unblock_response += "$" + std::to_string(final_id.length()) + "\r\n" + final_id + "\r\n";
         unblock_response += "*" + std::to_string(new_entry.fields.size() * 2) + "\r\n";
         for (const auto& field : new_entry.fields) {
             unblock_response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
             unblock_response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
         }
-        
         send(client.fd, unblock_response.c_str(), unblock_response.length(), 0);
     }
-    
+
     // Propagate to replicas if this isn't a replica connection
     if (connected_replicas.find(client_fd) == connected_replicas.end()) {
         propagate_to_replicas(parsed_command);
