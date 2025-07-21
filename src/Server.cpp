@@ -912,7 +912,33 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
     
     send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "INCR" && parsed_command.size() == 2) {
+    std::string key = parsed_command[1];
+    auto it = kv_store.find(key);
+    
+    if (it != kv_store.end()) {
+        // Check if value is a number
+        try {
+            long long value = std::stoll(it->second.value);
+            value++;
+            it->second.value = std::to_string(value);
+            
+            std::string response = ":" + std::to_string(value) + "\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            
+            if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+                propagate_to_replicas(parsed_command);
+            }
+        } catch (const std::exception& e) {
+            std::string response = "-ERR value is not an integer or out of range\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
     } else {
+        // Key doesn't exist - we'll handle this in later stages
+        std::string response = "-ERR key not found\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    }
+} else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
@@ -982,7 +1008,21 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         }
     } else if (command == "PING") {
         std::cout << "Replica: Received PING" << std::endl;
-    } else if (command == "XADD" && parsed_command.size() >= 5 && (parsed_command.size() % 2 == 1)) {
+    } else if (command == "INCR" && parsed_command.size() == 2) {
+    std::string key = parsed_command[1];
+    auto it = kv_store.find(key);
+    
+    if (it != kv_store.end()) {
+        try {
+            long long value = std::stoll(it->second.value);
+            value++;
+            it->second.value = std::to_string(value);
+            std::cout << "Replica: INCR '" << key << "' = " << value << std::endl;
+        } catch (...) {
+            std::cerr << "Replica: INCR failed - value is not an integer" << std::endl;
+        }
+    }
+} else if (command == "XADD" && parsed_command.size() >= 5 && (parsed_command.size() % 2 == 1)) {
         std::string stream_key = parsed_command[1];
         std::string entry_id = parsed_command[2];
         
