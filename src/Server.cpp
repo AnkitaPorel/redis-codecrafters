@@ -956,24 +956,40 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     } else {
         std::string response = "*" + std::to_string(commands.size()) + "\r\n";
         
+        // Create a buffer to capture command outputs
+        std::vector<std::string> command_responses;
+        
         for (const auto& cmd : commands) {
-            int temp_fd = dup(client_fd);
-            int pipe_fds[2];
-            pipe(pipe_fds);
-            dup2(pipe_fds[1], client_fd);
+            // Create a temporary string stream to capture output
+            std::stringstream output;
+            int saved_stdout = dup(1); // Save stdout
+            int pipefd[2];
+            pipe(pipefd);
+            dup2(pipefd[1], 1); // Redirect stdout to pipe
+            close(pipefd[1]);
             
-            execute_redis_command(pipe_fds[1], cmd);
+            // Execute the command
+            execute_redis_command(client_fd, cmd);
             
-            char buf[4096];
-            ssize_t bytes = read(pipe_fds[0], buf, sizeof(buf));
-            if (bytes > 0) {
-                response += std::string(buf, bytes);
+            // Restore stdout
+            dup2(saved_stdout, 1);
+            close(saved_stdout);
+            
+            // Read from pipe
+            char buffer[4096];
+            ssize_t bytes_read;
+            std::string cmd_output;
+            while ((bytes_read = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
+                cmd_output.append(buffer, bytes_read);
             }
+            close(pipefd[0]);
             
-            dup2(temp_fd, client_fd);
-            close(temp_fd);
-            close(pipe_fds[0]);
-            close(pipe_fds[1]);
+            command_responses.push_back(cmd_output);
+        }
+        
+        // Build the final response
+        for (const auto& resp : command_responses) {
+            response += resp;
         }
         
         send(client_fd, response.c_str(), response.length(), 0);
