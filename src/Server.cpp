@@ -893,7 +893,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     auto it = kv_store.find(key);
     
     if (it != kv_store.end()) {
-        // Key exists - check if value is a number
         try {
             long long value = std::stoll(it->second.value);
             value++;
@@ -910,7 +909,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             send(client_fd, response.c_str(), response.length(), 0);
         }
     } else {
-        // Key doesn't exist - set to 1
         kv_store[key] = ValueEntry("1");
         
         std::string response = ":1\r\n";
@@ -920,6 +918,13 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             propagate_to_replicas(parsed_command);
         }
     }
+} else if (command == "MULTI" && parsed_command.size() == 1) {
+    {
+        std::lock_guard<std::mutex> lock(multi_mutex);
+        clients_in_multi.insert(client_fd);
+    }
+    std::string response = "+OK\r\n";
+    send(client_fd, response.c_str(), response.length(), 0);
 } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -1472,6 +1477,11 @@ int main(int argc, char **argv) {
             std::cout << "Client (fd: " << client_fd << ") disconnected" << std::endl;
         } else {
             std::cerr << "recv error from client (fd: " << client_fd << "): " << strerror(errno) << std::endl;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(multi_mutex);
+            clients_in_multi.erase(client_fd);
         }
 
         {

@@ -70,6 +70,9 @@ struct BlockedClient {
     std::chrono::steady_clock::time_point expiry;
 };
 
+std::unordered_set<int> clients_in_multi;
+std::mutex multi_mutex;
+
 std::atomic<bool> shutdown_server(false);
 
 std::mutex blocked_clients_mutex;
