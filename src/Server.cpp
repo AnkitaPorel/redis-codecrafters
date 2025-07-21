@@ -1001,27 +1001,6 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         }
     } else if (command == "PING") {
         std::cout << "Replica: Received PING" << std::endl;
-    } else if (command == "XADD" && parsed_command.size() >= 4 && (parsed_command.size() % 2 == 0)) {
-        std::string stream_key = parsed_command[1];
-        std::string entry_id = parsed_command[2];
-        
-        std::cout << "Replica: XADD '" << stream_key << "' " << entry_id;
-        
-        if (stream_store.find(stream_key) == stream_store.end()) {
-            stream_store[stream_key] = StreamData();
-        }
-        
-        StreamEntry new_entry(entry_id);
-        
-        for (size_t i = 3; i < parsed_command.size(); i += 2) {
-            std::string field = parsed_command[i];
-            std::string value = parsed_command[i + 1];
-            new_entry.fields[field] = value;
-            std::cout << " " << field << " " << value;
-        }
-        std::cout << std::endl;
-        
-        stream_store[stream_key].entries.push_back(new_entry);
     } else if (command == "XREAD" && parsed_command.size() >= 3 && parsed_command[1] == "STREAMS") {
     // XREAD STREAMS key1 key2 ... id1 id2 ...
     size_t keys_start = 2;
@@ -1117,6 +1096,27 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
     }
     
     send(client_fd, response.c_str(), response.length(), 0);
+} else if (command == "XADD" && parsed_command.size() >= 4 && (parsed_command.size() % 2 == 0)) {
+        std::string stream_key = parsed_command[1];
+        std::string entry_id = parsed_command[2];
+        
+        std::cout << "Replica: XADD '" << stream_key << "' " << entry_id;
+        
+        if (stream_store.find(stream_key) == stream_store.end()) {
+            stream_store[stream_key] = StreamData();
+        }
+        
+        StreamEntry new_entry(entry_id);
+        
+        for (size_t i = 3; i < parsed_command.size(); i += 2) {
+            std::string field = parsed_command[i];
+            std::string value = parsed_command[i + 1];
+            new_entry.fields[field] = value;
+            std::cout << " " << field << " " << value;
+        }
+        std::cout << std::endl;
+        
+        stream_store[stream_key].entries.push_back(new_entry);
     }
     
     {

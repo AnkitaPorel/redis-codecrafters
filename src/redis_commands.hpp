@@ -38,7 +38,14 @@ long long generate_sequence_number(long long ms, const StreamData& stream) {
     for (const auto& entry : stream.entries) {
         long long entry_ms, entry_seq;
         if (parse_stream_id(entry.id, entry_ms, entry_seq)) {
-         
+            if (entry_ms == ms && entry_seq > max_seq) {
+                max_seq = entry_seq;
+            }
+        }
+    }
+    
+    return max_seq + 1;
+}
 
 void propagate_to_replicas(const std::vector<std::string>& command) {
     if (is_replica || connected_replicas.empty()) {
