@@ -724,45 +724,45 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "XREAD") {
-    // Handle basic XREAD command (without blocking for now)
-    if (parsed_command.size() < 4) {
+    // Handle both formats:
+    // 1. XREAD STREAMS key id
+    // 2. XREAD key id (simplified format)
+    
+    if (parsed_command.size() < 3) {
         std::string response = "-ERR wrong number of arguments for XREAD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
 
     size_t streams_pos = 1;
-    // Check for BLOCK option (though we won't implement blocking yet)
-    if (parsed_command[1] == "BLOCK") {
-        if (parsed_command.size() < 5) {
-            std::string response = "-ERR wrong number of arguments for XREAD with BLOCK\r\n";
+    size_t num_streams = 1;  // Default to single stream
+    
+    // Check if STREAMS keyword is present
+    bool has_streams_keyword = false;
+    if (parsed_command.size() >= 4 && parsed_command[1] == "STREAMS") {
+        has_streams_keyword = true;
+        streams_pos = 2;
+        num_streams = (parsed_command.size() - streams_pos) / 2;
+        if (num_streams == 0) {
+            std::string response = "-ERR wrong number of arguments for XREAD\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
             return;
         }
-        streams_pos = 3;
-    }
-
-    // Check for STREAMS keyword
-    if (parsed_command[streams_pos] != "STREAMS") {
-        std::string response = "-ERR syntax error, STREAMS keyword expected\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        return;
-    }
-
-    size_t num_streams = (parsed_command.size() - streams_pos - 1) / 2;
-    if (num_streams == 0) {
-        std::string response = "-ERR wrong number of arguments for XREAD\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        return;
     }
 
     std::vector<std::pair<std::string, std::string>> stream_ids;
-    size_t keys_start = streams_pos + 1;
-    size_t ids_start = keys_start + num_streams;
-
-    for (size_t i = 0; i < num_streams; i++) {
-        std::string stream = parsed_command[keys_start + i];
-        std::string id = parsed_command[ids_start + i];
+    
+    if (has_streams_keyword) {
+        // Format with STREAMS keyword
+        for (size_t i = 0; i < num_streams; i++) {
+            std::string stream = parsed_command[streams_pos + i];
+            std::string id = parsed_command[streams_pos + num_streams + i];
+            stream_ids.emplace_back(stream, id);
+        }
+    } else {
+        // Simplified format without STREAMS keyword
+        std::string stream = parsed_command[1];
+        std::string id = parsed_command[2];
         stream_ids.emplace_back(stream, id);
     }
 
