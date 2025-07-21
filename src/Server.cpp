@@ -145,32 +145,6 @@ void handle_signal(int signum) {
     shutdown_server = true;
 }
 
-void check_blocked_clients_timeout() {
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        
-        auto now = std::chrono::steady_clock::now();
-        std::vector<BlockedClient> timed_out;
-        
-        {
-            std::lock_guard<std::mutex> lock(blocked_clients_mutex);
-            for (auto it = blocked_clients.begin(); it != blocked_clients.end();) {
-                if (now >= it->expiry) {
-                    timed_out.push_back(*it);
-                    it = blocked_clients.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
-        
-        for (const auto& client : timed_out) {
-            std::string response = "*-1\r\n";
-            send(client.fd, response.c_str(), response.length(), 0);
-        }
-    }
-}
-
 bool parse_stream_id(const std::string& id, long long& ms, long long& seq) {
     size_t dash_pos = id.find('-');
     if (dash_pos == std::string::npos || dash_pos == 0 || dash_pos == id.length() - 1) {
