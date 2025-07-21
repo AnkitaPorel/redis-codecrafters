@@ -272,46 +272,46 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     } else if (command == "REPLCONF" && parsed_command.size() >= 3) {
         std::string subcommand = parsed_command[1];
     
-    for (char& c : subcommand) {
-        c = std::tolower(c);
-    }
-    
-    if (subcommand == "listening-port" && parsed_command.size() == 3) {
-        std::string port = parsed_command[2];
-        replica_info[client_fd]["listening-port"] = port;
-        std::cout << "Replica (fd: " << client_fd << ") listening on port: " << port << std::endl;
-        
-        std::string response = "+OK\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-    } else if (subcommand == "capa" && parsed_command.size() == 3) {
-        std::string capability = parsed_command[2];
-        replica_info[client_fd]["capa"] = capability;
-        std::cout << "Replica (fd: " << client_fd << ") capability: " << capability << std::endl;
-        
-        std::string response = "+OK\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-    } else if (subcommand == "ack" && parsed_command.size() == 3) {
-        try {
-        int ack_offset = std::stoi(parsed_command[2]);
-        std::cout << "Received ACK from replica (fd: " << client_fd << ") with offset: " << ack_offset << std::endl;
-        
-        {
-            std::lock_guard<std::mutex> wait_lock(wait_mutex);
-            replica_ack_offsets[client_fd] = ack_offset;
-            
-            if (ack_offset >= pending_wait_offset && pending_wait_offset > 0) {
-                acked_replicas++;
-                std::cout << "Replica " << client_fd << " acknowledged. Total acked: " << acked_replicas.load() << std::endl;
-                wait_cv.notify_all();
-            }
+        for (char& c : subcommand) {
+            c = std::tolower(c);
         }
-    } catch (const std::exception& e) {
-        std::cerr << "Invalid ACK offset: " << parsed_command[2] << std::endl;
-    }
-    } else {
-        std::string response = "-ERR unsupported REPLCONF subcommand\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-    }
+    
+        if (subcommand == "listening-port" && parsed_command.size() == 3) {
+            std::string port = parsed_command[2];
+            replica_info[client_fd]["listening-port"] = port;
+            std::cout << "Replica (fd: " << client_fd << ") listening on port: " << port << std::endl;
+        
+            std::string response = "+OK\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else if (subcommand == "capa" && parsed_command.size() == 3) {
+            std::string capability = parsed_command[2];
+            replica_info[client_fd]["capa"] = capability;
+            std::cout << "Replica (fd: " << client_fd << ") capability: " << capability << std::endl;
+        
+            std::string response = "+OK\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        } else if (subcommand == "ack" && parsed_command.size() == 3) {
+            try {
+                int ack_offset = std::stoi(parsed_command[2]);
+                std::cout << "Received ACK from replica (fd: " << client_fd << ") with offset: " << ack_offset << std::endl;
+        
+                {
+                    std::lock_guard<std::mutex> wait_lock(wait_mutex);
+                    replica_ack_offsets[client_fd] = ack_offset;
+            
+                    if (ack_offset >= pending_wait_offset && pending_wait_offset > 0) {
+                        acked_replicas++;
+                        std::cout << "Replica " << client_fd << " acknowledged. Total acked: " << acked_replicas.load() << std::endl;
+                        wait_cv.notify_all();
+                    }
+                }
+            } catch (const std::exception& e) {
+            std::cerr << "Invalid ACK offset: " << parsed_command[2] << std::endl;
+            }
+        } else {
+            std::string response = "-ERR unsupported REPLCONF subcommand\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+        }
     } else if (command == "PSYNC" && parsed_command.size() == 3) {
         std::string repl_id = parsed_command[1];
         std::string offset = parsed_command[2];
@@ -950,38 +950,99 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         queued_commands.erase(client_fd);
     }
     
-    if (commands.empty()) {
-        std::string response = "*0\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-    } else {
-        std::string response = "*" + std::to_string(commands.size()) + "\r\n";
-        
-        // Temporarily redirect stdout to capture command outputs
-        int saved_stdout = dup(STDOUT_FILENO);
-        int pipefd[2];
-        pipe(pipefd);
-        dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[1]);
-        
-        // Execute each command and capture output
-        for (const auto& cmd : commands) {
-            execute_redis_command(client_fd, cmd);
-            
-            // Read from pipe
-            char buffer[4096];
-            ssize_t bytes_read = read(pipefd[0], buffer, sizeof(buffer));
-            if (bytes_read > 0) {
-                response.append(buffer, bytes_read);
-            }
+    // Always return an array response
+    std::string response = "*" + std::to_string(commands.size()) + "\r\n";
+    
+    // Execute each command and generate appropriate responses
+    for (const auto& cmd : commands) {
+        if (cmd.empty()) {
+            response += "+OK\r\n";
+            continue;
         }
         
-        // Restore stdout
-        dup2(saved_stdout, STDOUT_FILENO);
-        close(saved_stdout);
-        close(pipefd[0]);
+        std::string command_name = cmd[0];
         
-        send(client_fd, response.c_str(), response.length(), 0);
+        // Handle each command type and generate the appropriate response
+        if (command_name == "SET" && (cmd.size() == 3 || cmd.size() == 5)) {
+            std::string key = cmd[1];
+            std::string value = cmd[2];
+            
+            if (cmd.size() == 3) {
+                kv_store[key] = ValueEntry(value);
+                response += "+OK\r\n";
+            } else if (cmd.size() == 5) {
+                std::string px_arg = cmd[3];
+                for (char& c : px_arg) {
+                    c = std::toupper(c);
+                }
+                if (px_arg == "PX") {
+                    try {
+                        long expiry_ms = std::stol(cmd[4]);
+                        if (expiry_ms <= 0) {
+                            response += "-ERR invalid expire time\r\n";
+                        } else {
+                            auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
+                            kv_store[key] = ValueEntry(value, expiry_time);
+                            response += "+OK\r\n";
+                        }
+                    } catch (const std::exception& e) {
+                        response += "-ERR invalid expire time\r\n";
+                    }
+                } else {
+                    response += "-ERR syntax error\r\n";
+                }
+            }
+            
+            // Propagate to replicas if this client is not a replica
+            if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+                propagate_to_replicas(cmd);
+            }
+            
+        } else if (command_name == "GET" && cmd.size() == 2) {
+            std::string key = cmd[1];
+            auto it = kv_store.find(key);
+            if (it != kv_store.end()) {
+                if (it->second.has_expiry && get_current_time() > it->second.expiry) {
+                    kv_store.erase(it);
+                    response += "$-1\r\n";
+                } else {
+                    std::string value = it->second.value;
+                    response += "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
+                }
+            } else {
+                response += "$-1\r\n";
+            }
+            
+        } else if (command_name == "INCR" && cmd.size() == 2) {
+            std::string key = cmd[1];
+            auto it = kv_store.find(key);
+            
+            if (it != kv_store.end()) {
+                try {
+                    long long value = std::stoll(it->second.value);
+                    value++;
+                    it->second.value = std::to_string(value);
+                    response += ":" + std::to_string(value) + "\r\n";
+                } catch (const std::exception& e) {
+                    response += "-ERR value is not an integer or out of range\r\n";
+                }
+            } else {
+                kv_store[key] = ValueEntry("1");
+                response += ":1\r\n";
+            }
+            
+            // Propagate to replicas if this client is not a replica
+            if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+                propagate_to_replicas(cmd);
+            }
+            
+        } else {
+            // For any other command, return OK (this is a simplified approach)
+            response += "+OK\r\n";
+        }
     }
+    
+    send(client_fd, response.c_str(), response.length(), 0);
 } else if (command == "MULTI" && parsed_command.size() == 1) {
     {
         std::lock_guard<std::mutex> lock(multi_mutex);
