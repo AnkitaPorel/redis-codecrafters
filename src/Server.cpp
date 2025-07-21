@@ -768,7 +768,20 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     // Populate streams vector
     for (size_t i = keys_start; i < ids_start; i++) {
-        streams.emplace_back(parsed_command[i], parsed_command[i + (ids_start - keys_start)]);
+        std::string stream_key = parsed_command[i];
+        std::string start_id = parsed_command[i + (ids_start - keys_start)];
+        
+        // Handle $ special case
+        if (start_id == "$") {
+            auto stream_it = stream_store.find(stream_key);
+            if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
+                start_id = stream_it->second.entries.back().id;
+            } else {
+                start_id = "0-0";
+            }
+        }
+        
+        streams.emplace_back(stream_key, start_id);
     }
 
     // Check for existing entries
@@ -778,19 +791,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         
         auto stream_it = stream_store.find(stream_key);
         if (stream_it == stream_store.end()) continue;
-
-        // Handle special IDs
-        if (start_id == "$") {
-            // For $, we want only new entries added after this command
-            if (stream_it->second.entries.empty()) {
-                start_id = "0-0";
-            } else {
-                start_id = stream_it->second.entries.back().id;
-            }
-        } else if (start_id == "-") {
-            // For -, we want all entries
-            start_id = "0-0";
-        }
 
         // Parse the start ID
         long long start_ms = 0, start_seq = 0;
@@ -844,6 +844,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
 
+    // If we have data or not blocking, return immediately
     if (has_data || block_time < 0) {
         if (has_data) {
             std::string final_response = "*" + std::to_string(responses.size()) + "\r\n";
@@ -857,11 +858,14 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
+    // Handle blocking case (block_time >= 0 and no immediate data)
     if (block_time == 0) {
+        // Block indefinitely - not handled in this simple implementation
         send(client_fd, "*0\r\n", 4, 0);
         return;
     }
 
+    // Add to blocked clients for positive block_time
     if (streams.size() != 1) {
         send(client_fd, "-ERR BLOCK option is only supported for a single stream\r\n", 56, 0);
         return;
@@ -871,26 +875,11 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     auto& stream_key = stream.first;
     auto& last_id = stream.second;
     
-    for (size_t i = keys_start; i < ids_start; i++) {
-        std::string stream_key = parsed_command[i];
-        std::string start_id = parsed_command[i + (ids_start - keys_start)];
-        
-        if (start_id == "$") {
-            auto stream_it = stream_store.find(stream_key);
-            if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
-                start_id = stream_it->second.entries.back().id;
-            } else {
-                start_id = "0-0";
-            }
-        }
-        
-        streams.emplace_back(stream_key, start_id);
-    }
-
+    // Add to blocked clients
     BlockedClient client;
     client.fd = client_fd;
     client.stream_key = stream_key;
-    client.last_id = blocking_last_id;
+    client.last_id = last_id;
     client.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_time);
 
     {
@@ -898,7 +887,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         blocked_clients.push_back(client);
         std::cout << "XREAD: Blocking client fd=" << client_fd 
                   << " on stream '" << stream_key 
-                  << "' with last_id '" << blocking_last_id << "'" << std::endl;
+                  << "' with last_id '" << last_id << "'" << std::endl;
     }
 } else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
