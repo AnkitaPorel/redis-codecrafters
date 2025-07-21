@@ -844,7 +844,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     }
 
-    // If we have data or not blocking, return immediately
     if (has_data || block_time < 0) {
         if (has_data) {
             std::string final_response = "*" + std::to_string(responses.size()) + "\r\n";
@@ -853,19 +852,16 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
             send(client_fd, final_response.c_str(), final_response.length(), 0);
         } else {
-            send(client_fd, "*0\r\n", 4, 0);  // Changed from *-1 to *0 for empty array
+            send(client_fd, "*0\r\n", 4, 0);
         }
         return;
     }
 
-    // Handle blocking case (block_time >= 0 and no immediate data)
     if (block_time == 0) {
-        // Block indefinitely - not handled in this simple implementation
         send(client_fd, "*0\r\n", 4, 0);
         return;
     }
 
-    // Add to blocked clients for positive block_time
     if (streams.size() != 1) {
         send(client_fd, "-ERR BLOCK option is only supported for a single stream\r\n", 56, 0);
         return;
@@ -875,18 +871,22 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     auto& stream_key = stream.first;
     auto& last_id = stream.second;
     
-    // For blocking, store the last ID we've seen
-    std::string blocking_last_id = last_id;
-    if (last_id == "$") {
-        auto stream_it = stream_store.find(stream_key);
-        if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
-            blocking_last_id = stream_it->second.entries.back().id;
-        } else {
-            blocking_last_id = "0-0";
+    for (size_t i = keys_start; i < ids_start; i++) {
+        std::string stream_key = parsed_command[i];
+        std::string start_id = parsed_command[i + (ids_start - keys_start)];
+        
+        if (start_id == "$") {
+            auto stream_it = stream_store.find(stream_key);
+            if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
+                start_id = stream_it->second.entries.back().id;
+            } else {
+                start_id = "0-0";
+            }
         }
+        
+        streams.emplace_back(stream_key, start_id);
     }
 
-    // Add to blocked clients
     BlockedClient client;
     client.fd = client_fd;
     client.stream_key = stream_key;
