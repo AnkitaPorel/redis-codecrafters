@@ -578,6 +578,7 @@ if (!stream_store[stream_key].entries.empty()) {
                 long long last_ms, last_seq;
                 if (parse_stream_id(entry_id, entry_ms, entry_seq) &&
                     parse_stream_id(it->last_id, last_ms, last_seq)) {
+                    // New entry should be greater than the last_id the client saw
                     if (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq)) {
                         to_unblock.push_back(*it);
                         it = blocked_clients.erase(it);
@@ -591,6 +592,7 @@ if (!stream_store[stream_key].entries.empty()) {
 
     // Respond to unblocked clients
     for (const auto& client : to_unblock) {
+        // Format: *1\r\n*2\r\n$stream_key_len\r\nstream_key\r\n*1\r\n*2\r\nentry_id\r\nfields...
         std::string unblock_response = "*1\r\n*2\r\n";
         unblock_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
         unblock_response += "*1\r\n*2\r\n";
@@ -601,6 +603,8 @@ if (!stream_store[stream_key].entries.empty()) {
             unblock_response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
         }
         send(client.fd, unblock_response.c_str(), unblock_response.length(), 0);
+        
+        std::cout << "Unblocked client fd: " << client.fd << " with entry: " << entry_id << std::endl;
     }
 
     // Propagate to replicas if this isn't a replica connection
