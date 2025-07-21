@@ -126,6 +126,23 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
+    if (parsed_command[0] == "DISCARD" && parsed_command.size() == 1) {
+        std::lock_guard<std::mutex> lock(multi_mutex);
+        if (clients_in_multi.find(client_fd) == clients_in_multi.end()) {
+            std::string response = "-ERR DISCARD without MULTI\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+        clients_in_multi.erase(client_fd);
+        {
+            std::lock_guard<std::mutex> qlock(queue_mutex);
+            queued_commands[client_fd].clear();
+        }
+        std::string response = "+OK\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+
     bool in_multi = false;
     {
         std::lock_guard<std::mutex> lock(multi_mutex);
@@ -354,456 +371,456 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     } else if (command == "WAIT" && parsed_command.size() == 3) {
         try {
-            int num_replicas_expected = std::stoi(parsed_command[1]);
-            int timeout_ms = std::stoi(parsed_command[2]);
+                int num_replicas_expected = std::stoi(parsed_command[1]);
+                int timeout_ms = std::stoi(parsed_command[2]);
             
-            std::cout << "WAIT command: expecting " << num_replicas_expected 
+                std::cout << "WAIT command: expecting " << num_replicas_expected 
                     << " replicas, timeout " << timeout_ms << "ms" << std::endl;
             
-            int current_connected = connected_replicas.size();
+                int current_connected = connected_replicas.size();
             
-            if (current_connected == 0) {
-                std::string response = ":0\r\n";
-                send(client_fd, response.c_str(), response.length(), 0);
-                std::cout << "No replicas connected, returning 0" << std::endl;
-                return;
-            }
+                if (current_connected == 0) {
+                    std::string response = ":0\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                    std::cout << "No replicas connected, returning 0" << std::endl;
+                    return;
+                }
             
-            if (master_offset == 0) {
-                std::string response = ":" + std::to_string(current_connected) + "\r\n";
-                send(client_fd, response.c_str(), response.length(), 0);
-                std::cout << "No writes to replicate, returning " << current_connected << std::endl;
-                return;
-            }
+                if (master_offset == 0) {
+                    std::string response = ":" + std::to_string(current_connected) + "\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                    std::cout << "No writes to replicate, returning " << current_connected << std::endl;
+                    return;
+                }
             
-            {
-                std::lock_guard<std::mutex> wait_lock(wait_mutex);
-                pending_wait_offset = master_offset;
-                expected_replicas = num_replicas_expected;
-                acked_replicas = 0;
+                {
+                    std::lock_guard<std::mutex> wait_lock(wait_mutex);
+                    pending_wait_offset = master_offset;
+                    expected_replicas = num_replicas_expected;
+                    acked_replicas = 0;
                 
-                for (int replica_fd : connected_replicas) {
-                    if (replica_ack_offsets.find(replica_fd) == replica_ack_offsets.end()) {
-                        replica_ack_offsets[replica_fd] = 0;
+                    for (int replica_fd : connected_replicas) {
+                        if (replica_ack_offsets.find(replica_fd) == replica_ack_offsets.end()) {
+                            replica_ack_offsets[replica_fd] = 0;
+                        }
                     }
                 }
-            }
             
-            send_getack_to_replicas();
+                send_getack_to_replicas();
             
-            int final_acked = 0;
-            auto start_time = std::chrono::steady_clock::now();
-            auto timeout_time = start_time + std::chrono::milliseconds(timeout_ms);
-            std::set<int> replicas_to_remove;
+                int final_acked = 0;
+                auto start_time = std::chrono::steady_clock::now();
+                auto timeout_time = start_time + std::chrono::milliseconds(timeout_ms);
+                std::set<int> replicas_to_remove;
             
-            while (true) {
-                {
-                    std::lock_guard<std::mutex> lock(wait_mutex);
-                    final_acked = acked_replicas;
-                }
+                while (true) {
+                    {
+                        std::lock_guard<std::mutex> lock(wait_mutex);
+                        final_acked = acked_replicas;
+                    }
                 
-                if (final_acked >= num_replicas_expected) {
-                    std::cout << "WAIT completed: " << final_acked << std::endl;
-                    break;
-                }
+                    if (final_acked >= num_replicas_expected) {
+                        std::cout << "WAIT completed: " << final_acked << std::endl;
+                        break;
+                    }
                 
-                auto now = std::chrono::steady_clock::now();
-                if (now >= timeout_time) {
-                    std::cout << "WAIT timed out: " << final_acked << std::endl;
-                    break;
-                }
+                    auto now = std::chrono::steady_clock::now();
+                    if (now >= timeout_time) {
+                        std::cout << "WAIT timed out: " << final_acked << std::endl;
+                        break;
+                    }
                 
-                auto remaining_time = timeout_time - now;
-                auto remaining_us = std::chrono::duration_cast<std::chrono::microseconds>(remaining_time).count();
-                struct timeval tv;
-                tv.tv_sec = remaining_us / 1000000;
-                tv.tv_usec = remaining_us % 1000000;
+                    auto remaining_time = timeout_time - now;
+                    auto remaining_us = std::chrono::duration_cast<std::chrono::microseconds>(remaining_time).count();
+                    struct timeval tv;
+                    tv.tv_sec = remaining_us / 1000000;
+                    tv.tv_usec = remaining_us % 1000000;
+
+                    if (tv.tv_sec > 0 || tv.tv_usec > 10000) {
+                        tv.tv_sec = 0;
+                        tv.tv_usec = 10000;
+                    }
                 
-                if (tv.tv_sec > 0 || tv.tv_usec > 10000) {
-                    tv.tv_sec = 0;
-                    tv.tv_usec = 10000;
-                }
+                    fd_set read_fds;
+                    FD_ZERO(&read_fds);
+                    int max_fd = -1;
                 
-                fd_set read_fds;
-                FD_ZERO(&read_fds);
-                int max_fd = -1;
+                    for (int fd : connected_replicas) {
+                        FD_SET(fd, &read_fds);
+                        if (fd > max_fd) max_fd = fd;
+                    }
                 
-                for (int fd : connected_replicas) {
-                    FD_SET(fd, &read_fds);
-                    if (fd > max_fd) max_fd = fd;
-                }
+                    int n = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
+                    if (n < 0) {
+                        std::cerr << "select error in WAIT: " << strerror(errno) << std::endl;
+                        continue;
+                    }
                 
-                int n = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
-                if (n < 0) {
-                    std::cerr << "select error in WAIT: " << strerror(errno) << std::endl;
-                    continue;
-                }
-                
-                replicas_to_remove.clear();
-                for (int fd : connected_replicas) {
-                    if (FD_ISSET(fd, &read_fds)) {
-                        char buffer[4096];
-                        int bytes = recv(fd, buffer, sizeof(buffer), 0);
-                        if (bytes > 0) {
-                            std::vector<std::string> cmd;
-                            parse_redis_command(std::string(buffer, bytes), cmd);
-                            execute_redis_command(fd, cmd);
-                        } else if (bytes <= 0) {
-                            std::cout << "Replica (fd: " << fd << ") disconnected during WAIT" << std::endl;
-                            replicas_to_remove.insert(fd);
+                    replicas_to_remove.clear();
+                    for (int fd : connected_replicas) {
+                        if (FD_ISSET(fd, &read_fds)) {
+                            char buffer[4096];
+                            int bytes = recv(fd, buffer, sizeof(buffer), 0);
+                            if (bytes > 0) {
+                                std::vector<std::string> cmd;
+                                parse_redis_command(std::string(buffer, bytes), cmd);
+                                execute_redis_command(fd, cmd);
+                            } else if (bytes <= 0) {
+                                std::cout << "Replica (fd: " << fd << ") disconnected during WAIT" << std::endl;
+                                replicas_to_remove.insert(fd);
                             
-                            {
-                                std::lock_guard<std::mutex> lock(wait_mutex);
-                                if (replica_ack_offsets[fd] >= pending_wait_offset) {
-                                    acked_replicas--;
+                                {
+                                    std::lock_guard<std::mutex> lock(wait_mutex);
+                                    if (replica_ack_offsets[fd] >= pending_wait_offset) {
+                                        acked_replicas--;
+                                    }
                                 }
                             }
                         }
                     }
-                }
                 
-                for (int fd : replicas_to_remove) {
-                    connected_replicas.erase(fd);
-                    replica_info.erase(fd);
-                    {
-                        std::lock_guard<std::mutex> lock(wait_mutex);
-                        replica_ack_offsets.erase(fd);
-                    }
-                }
-            }
-            
-            {
-                std::lock_guard<std::mutex> lock(wait_mutex);
-                final_acked = acked_replicas;
-            }
-            
-            std::string response = ":" + std::to_string(final_acked) + "\r\n";
-            send(client_fd, response.c_str(), response.length(), 0); 
-        } catch (const std::exception& e) {
-            std::cerr << "Invalid WAIT command arguments" << std::endl;
-            std::string response = "-ERR invalid arguments\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-        }
-    } else if (command == "XADD") {
-        if (parsed_command.size() < 5 || (parsed_command.size() % 2 == 0)) {
-            std::string response = "-ERR wrong number of arguments for XADD\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
-        }
-
-        std::string stream_key = parsed_command[1];
-        std::string entry_id = parsed_command[2];
-
-        if (entry_id == "*") {
-            entry_id = generate_stream_id();
-        } else {
-            size_t dash_pos = entry_id.find('-');
-            if (dash_pos != std::string::npos && entry_id.substr(dash_pos+1) == "*") {
-                std::string ms_str = entry_id.substr(0, dash_pos);
-                try {
-                    long long ms_val = std::stoll(ms_str);
-                    long long seq_val = 0;
-
-                    if (ms_val == 0) {
-                        seq_val = 1;
-                    }
-
-                    if (stream_store.find(stream_key) != stream_store.end()) {
-                        auto& entries = stream_store[stream_key].entries;
-                        if (!entries.empty()) {
-                            const auto& last_entry = entries.back();
-                            long long last_ms, last_seq;
-                            if (parse_stream_id(last_entry.id, last_ms, last_seq) && last_ms == ms_val) {
-                                seq_val = std::max(seq_val, last_seq + 1);
-                            }
+                    for (int fd : replicas_to_remove) {
+                        connected_replicas.erase(fd);
+                        replica_info.erase(fd);
+                        {
+                            std::lock_guard<std::mutex> lock(wait_mutex);
+                            replica_ack_offsets.erase(fd);
                         }
                     }
-
-                    entry_id = ms_str + "-" + std::to_string(seq_val);
-                } catch (...) {
-                    std::string response = "-ERR Invalid ID format for milliseconds part\r\n";
-                    send(client_fd, response.c_str(), response.length(), 0);
-                    return;
                 }
+            
+                {
+                    std::lock_guard<std::mutex> lock(wait_mutex);
+                    final_acked = acked_replicas;
+                }
+            
+                std::string response = ":" + std::to_string(final_acked) + "\r\n";
+                send(client_fd, response.c_str(), response.length(), 0); 
+            } catch (const std::exception& e) {
+                std::cerr << "Invalid WAIT command arguments" << std::endl;
+                std::string response = "-ERR invalid arguments\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
             }
-        }
-
-        long long ms, seq;
-        if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
-            std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
-        }
-
-        if (ms == 0 && seq == 0) {
-            std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
-        }
-
-        if (!stream_store[stream_key].entries.empty()) {
-            const auto& last_entry = stream_store[stream_key].entries.back();
-            long long last_ms, last_seq;
-            if (parse_stream_id(last_entry.id, last_ms, last_seq)) {
-                if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
-                    std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-                    send(client_fd, response.c_str(), response.length(), 0);
-                    return;
-                }
-            }
-        }
-
-        if (stream_store.find(stream_key) == stream_store.end()) {
-            stream_store[stream_key] = StreamData();
-        }
-
-        StreamEntry new_entry(entry_id);
-        for (size_t i = 3; i < parsed_command.size(); i += 2) {
-            if (i + 1 >= parsed_command.size()) break;
-            new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
-        }
-
-        stream_store[stream_key].entries.push_back(new_entry);
-
-        std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-
-        std::vector<BlockedClient> to_unblock;
-        {
-            std::lock_guard<std::mutex> lock(blocked_clients_mutex);
-            std::cout << "XADD: Added entry " << entry_id << " to stream " << stream_key << std::endl;
-            std::cout << "XADD: Checking " << blocked_clients.size() << " blocked clients" << std::endl;
-
-            for (auto it = blocked_clients.begin(); it != blocked_clients.end();) {
-                if (it->stream_key == stream_key) {
-                    long long entry_ms, entry_seq;
-                    long long last_ms, last_seq;
-
-                    bool entry_parsed = parse_stream_id(entry_id, entry_ms, entry_seq);
-                    bool last_parsed = parse_stream_id(it->last_id, last_ms, last_seq);
-
-                    bool should_unblock = false;
-                    if (entry_parsed && last_parsed) {
-                        should_unblock = (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq));
-                    } else if (it->last_id == "$") {
-                        should_unblock = true;
-                    }
-
-                    if (should_unblock) {
-                        to_unblock.push_back(*it);
-                        it = blocked_clients.erase(it);
-                        continue;
-                    }
-                }
-                ++it;
-            }
-        }
-
-    std::cout << "XADD: Will unblock " << to_unblock.size() << " clients" << std::endl;
-
-    for (const auto& client : to_unblock) {
-        std::string unblock_response = "*1\r\n*2\r\n";
-        unblock_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
-        unblock_response += "*1\r\n*2\r\n";
-        unblock_response += "$" + std::to_string(new_entry.id.length()) + "\r\n" + new_entry.id + "\r\n";
-        unblock_response += "*" + std::to_string(new_entry.fields.size() * 2) + "\r\n";
-        for (const auto& field : new_entry.fields) {
-            unblock_response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
-            unblock_response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
-        }
-
-        std::cout << "XADD: Sending unblock response to fd=" << client.fd 
-                  << ": " << unblock_response << std::endl;
-        send(client.fd, unblock_response.c_str(), unblock_response.length(), 0);
-    }
-
-    if (connected_replicas.find(client_fd) == connected_replicas.end()) {
-        propagate_to_replicas(parsed_command);
-    }
-} else if (command == "XRANGE" && parsed_command.size() == 4) {
-    std::string stream_key = parsed_command[1];
-    std::string start_id = parsed_command[2];
-    std::string end_id = parsed_command[3];
-    
-    if (stream_store.find(stream_key) == stream_store.end()) {
-        send(client_fd, "*0\r\n", 4, 0);
-        return;
-    }
-
-    const StreamData& stream = stream_store[stream_key];
-    std::vector<const StreamEntry*> matched_entries;
-
-    long long start_ms = 0, start_seq = 0;
-    if (start_id == "-") {
-        start_ms = 0;
-        start_seq = 0;
-    } else {
-        size_t dash_pos = start_id.find('-');
-        if (dash_pos != std::string::npos) {
-            try {
-                start_ms = std::stoll(start_id.substr(0, dash_pos));
-                if (dash_pos + 1 < start_id.length()) {
-                    start_seq = std::stoll(start_id.substr(dash_pos + 1));
-                }
-            } catch (...) {
-                send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
+        } else if (command == "XADD") {
+            if (parsed_command.size() < 5 || (parsed_command.size() % 2 == 0)) {
+                std::string response = "-ERR wrong number of arguments for XADD\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
                 return;
             }
-        } else {
-            try {
-                start_ms = std::stoll(start_id);
-            } catch (...) {
-                send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
-                return;
-            }
-        }
-    }
 
-    long long end_ms = LLONG_MAX, end_seq = LLONG_MAX;
-    if (end_id != "+") {
-        size_t dash_pos = end_id.find('-');
-        if (dash_pos != std::string::npos) {
-            try {
-                end_ms = std::stoll(end_id.substr(0, dash_pos));
-                if (dash_pos + 1 < end_id.length()) {
-                    end_seq = std::stoll(end_id.substr(dash_pos + 1));
-                }
-            } catch (...) {
-                send(client_fd, "-ERR Invalid end ID\r\n", 20, 0);
-                return;
-            }
-        } else {
-            try {
-                end_ms = std::stoll(end_id);
-            } catch (...) {
-                send(client_fd, "-ERR Invalid end ID\r\n", 20, 0);
-                return;
-            }
-        }
-    }
+            std::string stream_key = parsed_command[1];
+            std::string entry_id = parsed_command[2];
 
-    for (const auto& entry : stream.entries) {
-        long long entry_ms, entry_seq;
-        if (!parse_stream_id(entry.id, entry_ms, entry_seq)) {
-            continue;
-        }
-
-        if (entry_ms < start_ms || (entry_ms == start_ms && entry_seq < start_seq)) {
-            continue;
-        }
-
-        if (end_id != "+" && (entry_ms > end_ms || (entry_ms == end_ms && entry_seq > end_seq))) {
-            continue;
-        }
-
-        matched_entries.push_back(&entry);
-    }
-
-    std::string response = "*" + std::to_string(matched_entries.size()) + "\r\n";
-    
-    for (const auto entry : matched_entries) {
-        response += "*2\r\n";
-        
-        response += "$" + std::to_string(entry->id.length()) + "\r\n";
-        response += entry->id + "\r\n";
-        
-        response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
-        for (const auto& field : entry->fields) {
-            response += "$" + std::to_string(field.first.length()) + "\r\n";
-            response += field.first + "\r\n";
-            response += "$" + std::to_string(field.second.length()) + "\r\n";
-            response += field.second + "\r\n";
-        }
-    }
-
-    send(client_fd, response.c_str(), response.length(), 0);
-    } else if (command == "XREAD") {
-    int block_time = -1;
-    size_t streams_pos = 1;
-    std::vector<std::pair<std::string, std::string>> streams;
-    std::vector<std::string> responses;
-    bool has_data = false;
-
-    if (parsed_command.size() > 2) {
-        std::string second_arg = parsed_command[1];
-        std::transform(second_arg.begin(), second_arg.end(), second_arg.begin(), ::toupper);
-        if (second_arg == "BLOCK") {
-            try {
-                block_time = std::stoi(parsed_command[2]);
-                if (block_time < 0) {
-                    send(client_fd, "-ERR timeout is negative\r\n", 24, 0);
-                    return;
-                }
-                streams_pos = 3;
-            } catch (...) {
-                send(client_fd, "-ERR invalid timeout value\r\n", 27, 0);
-                return;
-            }
-        }
-    }
-
-    if (parsed_command.size() <= streams_pos) {
-        send(client_fd, "-ERR syntax error, STREAMS keyword expected\r\n", 44, 0);
-        return;
-    }
-    
-    std::string streams_keyword = parsed_command[streams_pos];
-    std::transform(streams_keyword.begin(), streams_keyword.end(), streams_keyword.begin(), ::toupper);
-    if (streams_keyword != "STREAMS") {
-        send(client_fd, "-ERR syntax error, STREAMS keyword expected\r\n", 44, 0);
-        return;
-    }
-
-    size_t keys_start = streams_pos + 1;
-    size_t ids_start = keys_start + (parsed_command.size() - keys_start) / 2;
-
-    if ((parsed_command.size() - keys_start) % 2 != 0 || ids_start == keys_start) {
-        send(client_fd, "-ERR wrong number of arguments for XREAD\r\n", 41, 0);
-        return;
-    }
-
-    for (size_t i = keys_start; i < ids_start; i++) {
-        std::string stream_key = parsed_command[i];
-        std::string start_id = parsed_command[i + (ids_start - keys_start)];
-        
-        if (start_id == "$") {
-            auto stream_it = stream_store.find(stream_key);
-            if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
-                start_id = stream_it->second.entries.back().id;
+            if (entry_id == "*") {
+                entry_id = generate_stream_id();
             } else {
-                start_id = "0-0";
-            }
-        }
-        
-        streams.emplace_back(stream_key, start_id);
-    }
+                size_t dash_pos = entry_id.find('-');
+                if (dash_pos != std::string::npos && entry_id.substr(dash_pos+1) == "*") {
+                    std::string ms_str = entry_id.substr(0, dash_pos);
+                    try {
+                        long long ms_val = std::stoll(ms_str);
+                        long long seq_val = 0;
 
-    for (auto& stream : streams) {
-        auto& stream_key = stream.first;
-        auto& start_id = stream.second;
-        
-        auto stream_it = stream_store.find(stream_key);
-        if (stream_it == stream_store.end()) continue;
+                        if (ms_val == 0) {
+                            seq_val = 1;
+                        }
+
+                        if (stream_store.find(stream_key) != stream_store.end()) {
+                            auto& entries = stream_store[stream_key].entries;
+                            if (!entries.empty()) {
+                                const auto& last_entry = entries.back();
+                                long long last_ms, last_seq;
+                                if (parse_stream_id(last_entry.id, last_ms, last_seq) && last_ms == ms_val) {
+                                    seq_val = std::max(seq_val, last_seq + 1);
+                                }
+                            }
+                        }
+
+                        entry_id = ms_str + "-" + std::to_string(seq_val);
+                    } catch (...) {
+                        std::string response = "-ERR Invalid ID format for milliseconds part\r\n";
+                        send(client_fd, response.c_str(), response.length(), 0);
+                        return;
+                    }
+                }
+            }
+
+            long long ms, seq;
+            if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq < 0) {
+                std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+
+            if (ms == 0 && seq == 0) {
+                std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+
+            if (!stream_store[stream_key].entries.empty()) {
+                const auto& last_entry = stream_store[stream_key].entries.back();
+                long long last_ms, last_seq;
+                if (parse_stream_id(last_entry.id, last_ms, last_seq)) {
+                    if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
+                        std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                        send(client_fd, response.c_str(), response.length(), 0);
+                        return;
+                    }
+                }
+            }
+
+            if (stream_store.find(stream_key) == stream_store.end()) {
+                stream_store[stream_key] = StreamData();
+            }
+
+            StreamEntry new_entry(entry_id);
+            for (size_t i = 3; i < parsed_command.size(); i += 2) {
+                if (i + 1 >= parsed_command.size()) break;
+                new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
+            }
+
+            stream_store[stream_key].entries.push_back(new_entry);
+
+            std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+
+            std::vector<BlockedClient> to_unblock;
+            {
+                std::lock_guard<std::mutex> lock(blocked_clients_mutex);
+                std::cout << "XADD: Added entry " << entry_id << " to stream " << stream_key << std::endl;
+                std::cout << "XADD: Checking " << blocked_clients.size() << " blocked clients" << std::endl;
+
+                for (auto it = blocked_clients.begin(); it != blocked_clients.end();) {
+                    if (it->stream_key == stream_key) {
+                        long long entry_ms, entry_seq;
+                        long long last_ms, last_seq;
+
+                        bool entry_parsed = parse_stream_id(entry_id, entry_ms, entry_seq);
+                        bool last_parsed = parse_stream_id(it->last_id, last_ms, last_seq);
+
+                        bool should_unblock = false;
+                        if (entry_parsed && last_parsed) {
+                            should_unblock = (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq));
+                        } else if (it->last_id == "$") {
+                            should_unblock = true;
+                        }
+
+                        if (should_unblock) {
+                            to_unblock.push_back(*it);
+                            it = blocked_clients.erase(it);
+                            continue;
+                        }
+                    }
+                    ++it;
+                }
+            }
+
+            std::cout << "XADD: Will unblock " << to_unblock.size() << " clients" << std::endl;
+
+            for (const auto& client : to_unblock) {
+            std::string unblock_response = "*1\r\n*2\r\n";
+            unblock_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
+            unblock_response += "*1\r\n*2\r\n";
+            unblock_response += "$" + std::to_string(new_entry.id.length()) + "\r\n" + new_entry.id + "\r\n";
+            unblock_response += "*" + std::to_string(new_entry.fields.size() * 2) + "\r\n";
+            for (const auto& field : new_entry.fields) {
+                unblock_response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
+                unblock_response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
+            }
+
+            std::cout << "XADD: Sending unblock response to fd=" << client.fd 
+                  << ": " << unblock_response << std::endl;
+            send(client.fd, unblock_response.c_str(), unblock_response.length(), 0);
+        }
+
+        if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+            propagate_to_replicas(parsed_command);
+        }
+    } else if (command == "XRANGE" && parsed_command.size() == 4) {
+        std::string stream_key = parsed_command[1];
+        std::string start_id = parsed_command[2];
+        std::string end_id = parsed_command[3];
+    
+        if (stream_store.find(stream_key) == stream_store.end()) {
+            send(client_fd, "*0\r\n", 4, 0);
+            return;
+        }
+
+        const StreamData& stream = stream_store[stream_key];
+        std::vector<const StreamEntry*> matched_entries;
 
         long long start_ms = 0, start_seq = 0;
-        size_t dash_pos = start_id.find('-');
-        if (dash_pos != std::string::npos) {
-            try {
-                start_ms = std::stoll(start_id.substr(0, dash_pos));
-                start_seq = std::stoll(start_id.substr(dash_pos + 1));
-            } catch (...) {
-                send(client_fd, "-ERR Invalid ID\r\n", 17, 0);
-                return;
-            }
+        if (start_id == "-") {
+            start_ms = 0;
+            start_seq = 0;
         } else {
-            try {
-                start_ms = std::stoll(start_id);
-                start_seq = 0;
-            } catch (...) {
-                send(client_fd, "-ERR Invalid ID\r\n", 17, 0);
-                return;
+            size_t dash_pos = start_id.find('-');
+            if (dash_pos != std::string::npos) {
+                try {
+                    start_ms = std::stoll(start_id.substr(0, dash_pos));
+                    if (dash_pos + 1 < start_id.length()) {
+                        start_seq = std::stoll(start_id.substr(dash_pos + 1));
+                    }
+                } catch (...) {
+                    send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
+                    return;
+                }
+            } else {
+                try {
+                    start_ms = std::stoll(start_id);
+                } catch (...) {
+                    send(client_fd, "-ERR Invalid start ID\r\n", 22, 0);
+                    return;
+                }
             }
         }
+
+        long long end_ms = LLONG_MAX, end_seq = LLONG_MAX;
+        if (end_id != "+") {
+            size_t dash_pos = end_id.find('-');
+            if (dash_pos != std::string::npos) {
+                try {
+                    end_ms = std::stoll(end_id.substr(0, dash_pos));
+                    if (dash_pos + 1 < end_id.length()) {
+                        end_seq = std::stoll(end_id.substr(dash_pos + 1));
+                    }
+                } catch (...) {
+                    send(client_fd, "-ERR Invalid end ID\r\n", 20, 0);
+                    return;
+                }
+            } else {
+                try {
+                    end_ms = std::stoll(end_id);
+                } catch (...) {
+                    send(client_fd, "-ERR Invalid end ID\r\n", 20, 0);
+                    return;
+                }
+            }
+        }
+
+        for (const auto& entry : stream.entries) {
+            long long entry_ms, entry_seq;
+            if (!parse_stream_id(entry.id, entry_ms, entry_seq)) {
+                continue;
+            }
+
+            if (entry_ms < start_ms || (entry_ms == start_ms && entry_seq < start_seq)) {
+                continue;
+            }
+
+            if (end_id != "+" && (entry_ms > end_ms || (entry_ms == end_ms && entry_seq > end_seq))) {
+                continue;
+            }
+
+            matched_entries.push_back(&entry);
+        }
+
+        std::string response = "*" + std::to_string(matched_entries.size()) + "\r\n";
+    
+        for (const auto entry : matched_entries) {
+            response += "*2\r\n";
+            
+            response += "$" + std::to_string(entry->id.length()) + "\r\n";
+            response += entry->id + "\r\n";
+            
+            response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
+            for (const auto& field : entry->fields) {
+                response += "$" + std::to_string(field.first.length()) + "\r\n";
+                response += field.first + "\r\n";
+                response += "$" + std::to_string(field.second.length()) + "\r\n";
+                response += field.second + "\r\n";
+            }
+        }
+
+        send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "XREAD") {
+        int block_time = -1;
+        size_t streams_pos = 1;
+        std::vector<std::pair<std::string, std::string>> streams;
+        std::vector<std::string> responses;
+        bool has_data = false;
+
+        if (parsed_command.size() > 2) {
+            std::string second_arg = parsed_command[1];
+            std::transform(second_arg.begin(), second_arg.end(), second_arg.begin(), ::toupper);
+            if (second_arg == "BLOCK") {
+                try {
+                    block_time = std::stoi(parsed_command[2]);
+                    if (block_time < 0) {
+                        send(client_fd, "-ERR timeout is negative\r\n", 24, 0);
+                        return;
+                    }
+                    streams_pos = 3;
+                } catch (...) {
+                    send(client_fd, "-ERR invalid timeout value\r\n", 27, 0);
+                    return;
+                }
+            }
+        }
+
+        if (parsed_command.size() <= streams_pos) {
+            send(client_fd, "-ERR syntax error, STREAMS keyword expected\r\n", 44, 0);
+            return;
+        }
+    
+        std::string streams_keyword = parsed_command[streams_pos];
+        std::transform(streams_keyword.begin(), streams_keyword.end(), streams_keyword.begin(), ::toupper);
+        if (streams_keyword != "STREAMS") {
+            send(client_fd, "-ERR syntax error, STREAMS keyword expected\r\n", 44, 0);
+            return;
+        }
+
+        size_t keys_start = streams_pos + 1;
+        size_t ids_start = keys_start + (parsed_command.size() - keys_start) / 2;
+
+        if ((parsed_command.size() - keys_start) % 2 != 0 || ids_start == keys_start) {
+            send(client_fd, "-ERR wrong number of arguments for XREAD\r\n", 41, 0);
+            return;
+        }
+
+        for (size_t i = keys_start; i < ids_start; i++) {
+            std::string stream_key = parsed_command[i];
+            std::string start_id = parsed_command[i + (ids_start - keys_start)];
+            
+            if (start_id == "$") {
+                auto stream_it = stream_store.find(stream_key);
+                if (stream_it != stream_store.end() && !stream_it->second.entries.empty()) {
+                    start_id = stream_it->second.entries.back().id;
+                } else {
+                    start_id = "0-0";
+                }
+            }
+            
+            streams.emplace_back(stream_key, start_id);
+        }
+
+        for (auto& stream : streams) {
+            auto& stream_key = stream.first;
+            auto& start_id = stream.second;
+        
+            auto stream_it = stream_store.find(stream_key);
+            if (stream_it == stream_store.end()) continue;
+
+            long long start_ms = 0, start_seq = 0;
+            size_t dash_pos = start_id.find('-');
+            if (dash_pos != std::string::npos) {
+                try {
+                    start_ms = std::stoll(start_id.substr(0, dash_pos));
+                    start_seq = std::stoll(start_id.substr(dash_pos + 1));
+                } catch (...) {
+                    send(client_fd, "-ERR Invalid ID\r\n", 17, 0);
+                    return;
+                }
+            } else {
+                try {
+                    start_ms = std::stoll(start_id);
+                    start_seq = 0;
+                } catch (...) {
+                    send(client_fd, "-ERR Invalid ID\r\n", 17, 0);
+                    return;
+                }
+            }
 
         std::vector<const StreamEntry*> matches;
         for (const auto& entry : stream_it->second.entries) {
@@ -1607,63 +1624,63 @@ int main(int argc, char **argv) {
             int client_fd = *it;
             
             if (FD_ISSET(client_fd, &read_fds)) {
-    char buffer[4096];
-    ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+                char buffer[4096];
+                ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
-    if (bytes_received <= 0) {
-        if (bytes_received == 0) {
-            std::cout << "Client (fd: " << client_fd << ") disconnected" << std::endl;
-        } else {
-            std::cerr << "recv error from client (fd: " << client_fd << "): " << strerror(errno) << std::endl;
-        }
+                if (bytes_received <= 0) {
+                    if (bytes_received == 0) {
+                        std::cout << "Client (fd: " << client_fd << ") disconnected" << std::endl;
+                    } else {
+                        std::cerr << "recv error from client (fd: " << client_fd << "): " << strerror(errno) << std::endl;
+                    }
 
-        {
-            std::lock_guard<std::mutex> lock(multi_mutex);
-            clients_in_multi.erase(client_fd);
-        }
+                    {
+                        std::lock_guard<std::mutex> lock(multi_mutex);
+                        clients_in_multi.erase(client_fd);
+                    }
 
-        {
-            std::lock_guard<std::mutex> lock(blocked_clients_mutex);
-            blocked_clients.erase(
-                std::remove_if(blocked_clients.begin(), blocked_clients.end(),
-                    [client_fd](const BlockedClient& bc) { return bc.fd == client_fd; }),
-                blocked_clients.end());
-        }
+                    {
+                        std::lock_guard<std::mutex> lock(blocked_clients_mutex);
+                        blocked_clients.erase(
+                            std::remove_if(blocked_clients.begin(), blocked_clients.end(),
+                                [client_fd](const BlockedClient& bc) { return bc.fd == client_fd; }),
+                            blocked_clients.end());
+                    }
 
-        replica_info.erase(client_fd);
-        connected_replicas.erase(client_fd);
-        {
-            std::lock_guard<std::mutex> wait_lock(wait_mutex);
-            replica_ack_offsets.erase(client_fd);
-        }
+                    replica_info.erase(client_fd);
+                    connected_replicas.erase(client_fd);
+                    {
+                        std::lock_guard<std::mutex> wait_lock(wait_mutex);
+                        replica_ack_offsets.erase(client_fd);
+                    }
 
-        close(client_fd);
-        it = client_fds.erase(it);
-        continue;
-    }
+                    close(client_fd);
+                    it = client_fds.erase(it);
+                    continue;
+                }
 
-    buffer[bytes_received] = '\0';
-    std::cout << "Received from client (fd: " << client_fd << ") [" << bytes_received << " bytes]: ";
-    for (ssize_t i = 0; i < bytes_received; ++i) {
-        if (buffer[i] == '\r') {
-            std::cout << "\\r";
-        } else if (buffer[i] == '\n') {
-            std::cout << "\\n";
-        } else {
-            std::cout << buffer[i];
-        }
-    }
-    std::cout << std::endl;
+                buffer[bytes_received] = '\0';
+                std::cout << "Received from client (fd: " << client_fd << ") [" << bytes_received << " bytes]: ";
+                for (ssize_t i = 0; i < bytes_received; ++i) {
+                    if (buffer[i] == '\r') {
+                        std::cout << "\\r";
+                    } else if (buffer[i] == '\n') {
+                        std::cout << "\\n";
+                    } else {
+                        std::cout << buffer[i];
+                    }
+                }
+                std::cout << std::endl;
 
-    try {
-        std::vector<std::string> parsed_command;
-        parse_redis_command(buffer, parsed_command);
-        execute_redis_command(client_fd, parsed_command);
-    } catch (const std::exception& e) {
-        std::string response = "-ERR protocol error: " + std::string(e.what()) + "\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-    }
-}
+                try {
+                    std::vector<std::string> parsed_command;
+                    parse_redis_command(buffer, parsed_command);
+                    execute_redis_command(client_fd, parsed_command);
+                } catch (const std::exception& e) {
+                    std::string response = "-ERR protocol error: " + std::string(e.what()) + "\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                }
+            }
             ++it;
         }
     }
