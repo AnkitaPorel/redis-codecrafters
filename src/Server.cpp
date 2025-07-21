@@ -477,11 +477,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             send(client_fd, response.c_str(), response.length(), 0);
             return;
         }
-        if (parsed_command.size() < 4 || (parsed_command.size() % 2 != 0)) {
-            std::string response = "-ERR wrong number of arguments for XADD\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
-        }
 
         std::string stream_key = parsed_command[1];
         std::string entry_id = parsed_command[2];
