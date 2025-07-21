@@ -994,6 +994,101 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 
     send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "XREAD" && parsed_command.size() >= 3 && parsed_command[1] == "STREAMS") {
+    // XREAD STREAMS key1 key2 ... id1 id2 ...
+    size_t keys_start = 2;
+    size_t ids_start = keys_start + (parsed_command.size() - keys_start) / 2;
+    
+    if ((parsed_command.size() - keys_start) % 2 != 0) {
+        std::string response = "-ERR wrong number of arguments for XREAD\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+    
+    std::vector<std::pair<std::string, std::string>> key_id_pairs;
+    for (size_t i = keys_start; i < ids_start; i++) {
+        key_id_pairs.emplace_back(parsed_command[i], parsed_command[i + (ids_start - keys_start)]);
+    }
+    
+    std::string response = "*" + std::to_string(key_id_pairs.size()) + "\r\n";
+    bool found_any = false;
+    
+    for (const auto& pair : key_id_pairs) {
+        const std::string& stream_key = pair.first;
+        const std::string& start_id = pair.second;
+        
+        auto stream_it = stream_store.find(stream_key);
+        if (stream_it == stream_store.end()) {
+            continue;
+        }
+        
+        const StreamData& stream = stream_it->second;
+        std::vector<const StreamEntry*> matched_entries;
+        
+        long long start_ms = 0, start_seq = 0;
+        if (start_id == "$") {
+            // Special case: only new entries
+            if (!stream.entries.empty()) {
+                const StreamEntry& last_entry = stream.entries.back();
+                parse_stream_id(last_entry.id, start_ms, start_seq);
+            }
+        } else {
+            size_t dash_pos = start_id.find('-');
+            if (dash_pos != std::string::npos) {
+                try {
+                    start_ms = std::stoll(start_id.substr(0, dash_pos));
+                    if (dash_pos + 1 < start_id.length()) {
+                        start_seq = std::stoll(start_id.substr(dash_pos + 1));
+                    }
+                } catch (...) {
+                    // Invalid ID format, skip this stream
+                    continue;
+                }
+            } else {
+                try {
+                    start_ms = std::stoll(start_id);
+                } catch (...) {
+                    // Invalid ID format, skip this stream
+                    continue;
+                }
+            }
+        }
+        
+        for (const auto& entry : stream.entries) {
+            long long entry_ms, entry_seq;
+            if (!parse_stream_id(entry.id, entry_ms, entry_seq)) {
+                continue;
+            }
+            
+            if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
+                matched_entries.push_back(&entry);
+            }
+        }
+        
+        if (!matched_entries.empty()) {
+            found_any = true;
+            response += "*2\r\n";
+            response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
+            
+            response += "*" + std::to_string(matched_entries.size()) + "\r\n";
+            for (const auto entry : matched_entries) {
+                response += "*2\r\n";
+                response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
+                
+                response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
+                for (const auto& field : entry->fields) {
+                    response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
+                    response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
+                }
+            }
+        }
+    }
+    
+    if (!found_any) {
+        response = "*-1\r\n";
+    }
+    
+    send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
@@ -1091,102 +1186,7 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         }
     } else if (command == "PING") {
         std::cout << "Replica: Received PING" << std::endl;
-    } else if (command == "XREAD" && parsed_command.size() >= 3 && parsed_command[1] == "STREAMS") {
-    // XREAD STREAMS key1 key2 ... id1 id2 ...
-    size_t keys_start = 2;
-    size_t ids_start = keys_start + (parsed_command.size() - keys_start) / 2;
-    
-    if ((parsed_command.size() - keys_start) % 2 != 0) {
-        std::string response = "-ERR wrong number of arguments for XREAD\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        return;
-    }
-    
-    std::vector<std::pair<std::string, std::string>> key_id_pairs;
-    for (size_t i = keys_start; i < ids_start; i++) {
-        key_id_pairs.emplace_back(parsed_command[i], parsed_command[i + (ids_start - keys_start)]);
-    }
-    
-    std::string response = "*" + std::to_string(key_id_pairs.size()) + "\r\n";
-    bool found_any = false;
-    
-    for (const auto& pair : key_id_pairs) {
-        const std::string& stream_key = pair.first;
-        const std::string& start_id = pair.second;
-        
-        auto stream_it = stream_store.find(stream_key);
-        if (stream_it == stream_store.end()) {
-            continue;
-        }
-        
-        const StreamData& stream = stream_it->second;
-        std::vector<const StreamEntry*> matched_entries;
-        
-        long long start_ms = 0, start_seq = 0;
-        if (start_id == "$") {
-            // Special case: only new entries
-            if (!stream.entries.empty()) {
-                const StreamEntry& last_entry = stream.entries.back();
-                parse_stream_id(last_entry.id, start_ms, start_seq);
-            }
-        } else {
-            size_t dash_pos = start_id.find('-');
-            if (dash_pos != std::string::npos) {
-                try {
-                    start_ms = std::stoll(start_id.substr(0, dash_pos));
-                    if (dash_pos + 1 < start_id.length()) {
-                        start_seq = std::stoll(start_id.substr(dash_pos + 1));
-                    }
-                } catch (...) {
-                    // Invalid ID format, skip this stream
-                    continue;
-                }
-            } else {
-                try {
-                    start_ms = std::stoll(start_id);
-                } catch (...) {
-                    // Invalid ID format, skip this stream
-                    continue;
-                }
-            }
-        }
-        
-        for (const auto& entry : stream.entries) {
-            long long entry_ms, entry_seq;
-            if (!parse_stream_id(entry.id, entry_ms, entry_seq)) {
-                continue;
-            }
-            
-            if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
-                matched_entries.push_back(&entry);
-            }
-        }
-        
-        if (!matched_entries.empty()) {
-            found_any = true;
-            response += "*2\r\n";
-            response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
-            
-            response += "*" + std::to_string(matched_entries.size()) + "\r\n";
-            for (const auto entry : matched_entries) {
-                response += "*2\r\n";
-                response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
-                
-                response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
-                for (const auto& field : entry->fields) {
-                    response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
-                    response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
-                }
-            }
-        }
-    }
-    
-    if (!found_any) {
-        response = "*-1\r\n";
-    }
-    
-    send(client_fd, response.c_str(), response.length(), 0);
-} else if (command == "XADD" && parsed_command.size() >= 4 && (parsed_command.size() % 2 == 0)) {
+    } else if (command == "XADD" && parsed_command.size() >= 4 && (parsed_command.size() % 2 == 0)) {
         std::string stream_key = parsed_command[1];
         std::string entry_id = parsed_command[2];
         
