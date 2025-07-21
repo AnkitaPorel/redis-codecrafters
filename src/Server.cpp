@@ -820,6 +820,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         send(client_fd, response.c_str(), response.length(), 0);
     }
     } else if (command == "XADD") {
+    // Minimum 4 args: XADD, stream, ID, at least one field-value pair
     if (parsed_command.size() < 4 || (parsed_command.size() % 2 != 0)) {
         std::string response = "-ERR wrong number of arguments for XADD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -834,16 +835,29 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         stream_store[stream_key] = StreamData();
     }
 
-    // Validate or generate ID
-    auto [valid, final_id] = validate_or_generate_id(entry_id, stream_store[stream_key]);
-    if (!valid) {
+    // Validate the ID format
+    long long ms, seq;
+    if (!parse_stream_id(entry_id, ms, seq) || ms < 0 || seq <= 0) {
         std::string response = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
 
+    // Check if ID is greater than last entry
+    if (!stream_store[stream_key].entries.empty()) {
+        const auto& last_entry = stream_store[stream_key].entries.back();
+        long long last_ms, last_seq;
+        if (parse_stream_id(last_entry.id, last_ms, last_seq)) {
+            if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
+                std::string response = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+        }
+    }
+
     // Create new entry
-    StreamEntry new_entry(final_id);
+    StreamEntry new_entry(entry_id);
     for (size_t i = 3; i < parsed_command.size(); i += 2) {
         if (i + 1 >= parsed_command.size()) break;
         new_entry.fields[parsed_command[i]] = parsed_command[i + 1];
@@ -853,7 +867,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     stream_store[stream_key].entries.push_back(new_entry);
 
     // Return the entry ID
-    std::string response = "$" + std::to_string(final_id.length()) + "\r\n" + final_id + "\r\n";
+    std::string response = "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
     send(client_fd, response.c_str(), response.length(), 0);
 
     // Notify blocked clients
@@ -864,7 +878,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             if (it->stream_key == stream_key) {
                 long long entry_ms, entry_seq;
                 long long last_ms, last_seq;
-                if (parse_stream_id(final_id, entry_ms, entry_seq) &&
+                if (parse_stream_id(entry_id, entry_ms, entry_seq) &&
                     parse_stream_id(it->last_id, last_ms, last_seq)) {
                     if (entry_ms > last_ms || (entry_ms == last_ms && entry_seq > last_seq)) {
                         to_unblock.push_back(*it);
@@ -882,7 +896,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string unblock_response = "*1\r\n*2\r\n";
         unblock_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
         unblock_response += "*1\r\n*2\r\n";
-        unblock_response += "$" + std::to_string(final_id.length()) + "\r\n" + final_id + "\r\n";
+        unblock_response += "$" + std::to_string(entry_id.length()) + "\r\n" + entry_id + "\r\n";
         unblock_response += "*" + std::to_string(new_entry.fields.size() * 2) + "\r\n";
         for (const auto& field : new_entry.fields) {
             unblock_response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
