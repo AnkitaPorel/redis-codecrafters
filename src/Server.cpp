@@ -126,6 +126,20 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
+    bool in_multi = false;
+    {
+        std::lock_guard<std::mutex> lock(multi_mutex);
+        in_multi = clients_in_multi.find(client_fd) != clients_in_multi.end();
+    }
+
+    if (in_multi && parsed_command[0] != "MULTI" && parsed_command[0] != "EXEC") {
+        std::lock_guard<std::mutex> qlock(queue_mutex);
+        queued_commands[client_fd].push_back(parsed_command);
+        std::string response = "+QUEUED\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+
     std::string command = parsed_command[0];
 
     if (command == "PING") {
@@ -926,12 +940,31 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             send(client_fd, response.c_str(), response.length(), 0);
             return;
         }
+        clients_in_multi.erase(client_fd);
     }
-    // For now, we just handle the error case - actual EXEC implementation will come later
+    
+    std::vector<std::vector<std::string>> commands;
+    {
+        std::lock_guard<std::mutex> qlock(queue_mutex);
+        commands = queued_commands[client_fd];
+        queued_commands.erase(client_fd);
+    }
+    
+    if (commands.empty()) {
+        std::string response = "*0\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    } else {
+        std::string response = "-ERR Transaction contains no commands\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    }
 } else if (command == "MULTI" && parsed_command.size() == 1) {
     {
         std::lock_guard<std::mutex> lock(multi_mutex);
         clients_in_multi.insert(client_fd);
+        {
+            std::lock_guard<std::mutex> qlock(queue_mutex);
+            queued_commands[client_fd].clear();
+        }
     }
     std::string response = "+OK\r\n";
     send(client_fd, response.c_str(), response.length(), 0);
