@@ -99,22 +99,6 @@ std::string command_to_resp_array(const std::vector<std::string>& command) {
     return resp;
 }
 
-bool parse_stream_id(const std::string& id, long long& ms, long long& seq) {
-    size_t dash_pos = id.find('-');
-    if (dash_pos == std::string::npos || dash_pos == 0 || dash_pos == id.length() - 1) {
-        return false;
-    }
-    
-    try {
-        ms = std::stoll(id.substr(0, dash_pos));
-        seq = std::stoll(id.substr(dash_pos + 1));
-    } catch (const std::exception& e) {
-        return false;
-    }
-    
-    return true;
-}
-
 void propagate_to_replicas(const std::vector<std::string>& command) {
     if (is_replica || connected_replicas.empty()) {
         return;
@@ -224,80 +208,6 @@ void load_rdb_file() {
         }
     } catch (const std::exception& e) {
         std::cerr << "Error loading RDB file: " << e.what() << std::endl;
-    }
-}
-
-long long generate_sequence_number(long long ms, const StreamData& stream) {
-    if (ms == 0) {
-        if (stream.entries.empty()) {
-            return 1;
-        }
-    } else {
-        if (stream.entries.empty()) {
-            return 0;
-        }
-    }
-
-    long long max_seq = (ms == 0) ? 0 : -1;
-    
-    for (const auto& entry : stream.entries) {
-        long long entry_ms, entry_seq;
-        if (parse_stream_id(entry.id, entry_ms, entry_seq)) {
-            if (entry_ms == ms && entry_seq > max_seq) {
-                max_seq = entry_seq;
-            }
-        }
-    }
-    
-    return max_seq + 1;
-}
-
-std::pair<bool, std::string> validate_or_generate_id(const std::string& id_spec, StreamData& stream) {
-    size_t dash_pos = id_spec.find('-');
-    if (dash_pos == std::string::npos || dash_pos == 0 || dash_pos == id_spec.length() - 1) {
-        return {false, ""};
-    }
-    
-    std::string ms_part = id_spec.substr(0, dash_pos);
-    std::string seq_part = id_spec.substr(dash_pos + 1);
-    
-    long long ms;
-    try {
-        ms = std::stoll(ms_part);
-    } catch (const std::exception& e) {
-        return {false, ""};
-    }
-    
-    if (seq_part == "*") {
-        long long seq = generate_sequence_number(ms, stream);
-        return {true, ms_part + "-" + std::to_string(seq)};
-    }
-    
-    try {
-        long long seq = std::stoll(seq_part);
-        if (ms < 0 || seq <= 0) {
-            return {false, ""};
-        }
-        
-        if (stream.entries.empty()) {
-            if (ms > 0 || (ms == 0 && seq > 0)) {
-                return {true, id_spec};
-            }
-            return {false, ""};
-        }
-        
-        const std::string& last_id = stream.entries.back().id;
-        long long last_ms, last_seq;
-        if (!parse_stream_id(last_id, last_ms, last_seq)) {
-            return {false, ""};
-        }
-        
-        if (ms > last_ms || (ms == last_ms && seq > last_seq)) {
-            return {true, id_spec};
-        }
-        return {false, ""};
-    } catch (const std::exception& e) {
-        return {false, ""};
     }
 }
 
@@ -1112,6 +1022,101 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         std::cout << std::endl;
         
         stream_store[stream_key].entries.push_back(new_entry);
+    } else if (command == "XREAD" && parsed_command.size() >= 3 && parsed_command[1] == "STREAMS") {
+    // XREAD STREAMS key1 key2 ... id1 id2 ...
+    size_t keys_start = 2;
+    size_t ids_start = keys_start + (parsed_command.size() - keys_start) / 2;
+    
+    if ((parsed_command.size() - keys_start) % 2 != 0) {
+        std::string response = "-ERR wrong number of arguments for XREAD\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+    
+    std::vector<std::pair<std::string, std::string>> key_id_pairs;
+    for (size_t i = keys_start; i < ids_start; i++) {
+        key_id_pairs.emplace_back(parsed_command[i], parsed_command[i + (ids_start - keys_start)]);
+    }
+    
+    std::string response = "*" + std::to_string(key_id_pairs.size()) + "\r\n";
+    bool found_any = false;
+    
+    for (const auto& pair : key_id_pairs) {
+        const std::string& stream_key = pair.first;
+        const std::string& start_id = pair.second;
+        
+        auto stream_it = stream_store.find(stream_key);
+        if (stream_it == stream_store.end()) {
+            continue;
+        }
+        
+        const StreamData& stream = stream_it->second;
+        std::vector<const StreamEntry*> matched_entries;
+        
+        long long start_ms = 0, start_seq = 0;
+        if (start_id == "$") {
+            // Special case: only new entries
+            if (!stream.entries.empty()) {
+                const StreamEntry& last_entry = stream.entries.back();
+                parse_stream_id(last_entry.id, start_ms, start_seq);
+            }
+        } else {
+            size_t dash_pos = start_id.find('-');
+            if (dash_pos != std::string::npos) {
+                try {
+                    start_ms = std::stoll(start_id.substr(0, dash_pos));
+                    if (dash_pos + 1 < start_id.length()) {
+                        start_seq = std::stoll(start_id.substr(dash_pos + 1));
+                    }
+                } catch (...) {
+                    // Invalid ID format, skip this stream
+                    continue;
+                }
+            } else {
+                try {
+                    start_ms = std::stoll(start_id);
+                } catch (...) {
+                    // Invalid ID format, skip this stream
+                    continue;
+                }
+            }
+        }
+        
+        for (const auto& entry : stream.entries) {
+            long long entry_ms, entry_seq;
+            if (!parse_stream_id(entry.id, entry_ms, entry_seq)) {
+                continue;
+            }
+            
+            if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
+                matched_entries.push_back(&entry);
+            }
+        }
+        
+        if (!matched_entries.empty()) {
+            found_any = true;
+            response += "*2\r\n";
+            response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
+            
+            response += "*" + std::to_string(matched_entries.size()) + "\r\n";
+            for (const auto entry : matched_entries) {
+                response += "*2\r\n";
+                response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
+                
+                response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
+                for (const auto& field : entry->fields) {
+                    response += "$" + std::to_string(field.first.length()) + "\r\n" + field.first + "\r\n";
+                    response += "$" + std::to_string(field.second.length()) + "\r\n" + field.second + "\r\n";
+                }
+            }
+        }
+    }
+    
+    if (!found_any) {
+        response = "*-1\r\n";
+    }
+    
+    send(client_fd, response.c_str(), response.length(), 0);
     }
     
     {
