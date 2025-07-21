@@ -823,7 +823,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             long long entry_ms, entry_seq;
             if (!parse_stream_id(entry.id, entry_ms, entry_seq)) continue;
 
-            if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
+            if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq >= start_seq)) {
                 matches.push_back(&entry);
             }
         }
