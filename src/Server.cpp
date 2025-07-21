@@ -252,50 +252,6 @@ long long generate_sequence_number(long long ms, const StreamData& stream) {
     return max_seq + 1;
 }
 
-void propagate_to_replicas(const std::vector<std::string>& command) {
-    if (is_replica || connected_replicas.empty()) {
-        return;
-    }
-    
-    if (!is_write_command(command[0])) {
-        return;
-    }
-    
-    std::string resp_command = command_to_resp_array(command);
-    int cmd_size = resp_command.size();
-    
-    {
-        std::lock_guard<std::mutex> lock(offset_mutex);
-        master_offset += cmd_size;
-    }
-    
-    std::cout << "Propagating command (" << cmd_size << " bytes) to " 
-              << connected_replicas.size() << " replicas" << std::endl;
-    
-    for (auto it = connected_replicas.begin(); it != connected_replicas.end();) {
-        int replica_fd = *it;
-        ssize_t bytes_sent = send(replica_fd, resp_command.c_str(), resp_command.length(), MSG_NOSIGNAL);
-        
-        if (bytes_sent < 0) {
-            std::lock_guard<std::mutex> lock(offset_mutex);
-            replica_offsets.erase(replica_fd);
-            replica_info.erase(replica_fd);
-            replica_ack_offsets.erase(replica_fd);
-            it = connected_replicas.erase(it);
-            std::cout << "Replica (fd: " << replica_fd << ") disconnected" << std::endl;
-        } else {
-            // Initialize replica ACK offset if not exists
-            {
-                std::lock_guard<std::mutex> lock(wait_mutex);
-                if (replica_ack_offsets.find(replica_fd) == replica_ack_offsets.end()) {
-                    replica_ack_offsets[replica_fd] = 0;
-                }
-            }
-            ++it;
-        }
-    }
-}
-
 std::pair<bool, std::string> validate_or_generate_id(const std::string& id_spec, StreamData& stream) {
     size_t dash_pos = id_spec.find('-');
     if (dash_pos == std::string::npos || dash_pos == 0 || dash_pos == id_spec.length() - 1) {
