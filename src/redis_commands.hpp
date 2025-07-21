@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <unordered_set>
 #include <netdb.h>
 #include <sys/select.h>
 #include <thread>
