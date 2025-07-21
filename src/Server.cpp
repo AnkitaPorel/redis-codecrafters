@@ -724,55 +724,58 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
     send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "XREAD") {
-    // Basic XREAD implementation without blocking
-    if (parsed_command.size() < 3 || parsed_command[1] != "STREAMS") {
+    // Handle basic XREAD command (without blocking for now)
+    if (parsed_command.size() < 4) {
         std::string response = "-ERR wrong number of arguments for XREAD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
 
-    size_t streams_pos = 2;
-    size_t num_streams = (parsed_command.size() - streams_pos) / 2;
-    
-    if (num_streams == 0 || (parsed_command.size() - streams_pos) % 2 != 0) {
+    size_t streams_pos = 1;
+    // Check for BLOCK option (though we won't implement blocking yet)
+    if (parsed_command[1] == "BLOCK") {
+        if (parsed_command.size() < 5) {
+            std::string response = "-ERR wrong number of arguments for XREAD with BLOCK\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+        streams_pos = 3;
+    }
+
+    // Check for STREAMS keyword
+    if (parsed_command[streams_pos] != "STREAMS") {
+        std::string response = "-ERR syntax error, STREAMS keyword expected\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
+
+    size_t num_streams = (parsed_command.size() - streams_pos - 1) / 2;
+    if (num_streams == 0) {
         std::string response = "-ERR wrong number of arguments for XREAD\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         return;
     }
 
     std::vector<std::pair<std::string, std::string>> stream_ids;
+    size_t keys_start = streams_pos + 1;
+    size_t ids_start = keys_start + num_streams;
+
     for (size_t i = 0; i < num_streams; i++) {
-        std::string stream = parsed_command[streams_pos + i];
-        std::string id = parsed_command[streams_pos + num_streams + i];
+        std::string stream = parsed_command[keys_start + i];
+        std::string id = parsed_command[ids_start + i];
         stream_ids.emplace_back(stream, id);
     }
 
-    // Check if any data is available
-    bool data_available = false;
-    for (const auto& pair : stream_ids) {
-        auto it = stream_store.find(pair.first);
-        if (it != stream_store.end() && !it->second.entries.empty()) {
-            data_available = true;
-            break;
-        }
-    }
-
-    if (!data_available) {
-        std::string response = "*-1\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-        return;
-    }
-
     // Build response
-    std::string response = "*" + std::to_string(num_streams) + "\r\n";
-    
+    std::vector<std::string> stream_responses;
+    bool has_data = false;
+
     for (const auto& pair : stream_ids) {
         const std::string& stream_key = pair.first;
         const std::string& start_id = pair.second;
-        
+
         auto it = stream_store.find(stream_key);
-        if (it == stream_store.end()) {
-            response += "*0\r\n";
+        if (it == stream_store.end() || it->second.entries.empty()) {
             continue;
         }
 
@@ -781,13 +784,14 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
 
         long long start_ms = 0, start_seq = 0;
         if (start_id == "-") {
+            // From beginning
             start_ms = 0;
             start_seq = 0;
         } else if (start_id == "$") {
-            // For $, we should return only new entries, but for simplicity we'll return all
-            start_ms = 0;
-            start_seq = 0;
+            // Only new entries (return nothing for this simple implementation)
+            continue;
         } else {
+            // Parse specific ID
             size_t dash_pos = start_id.find('-');
             if (dash_pos != std::string::npos) {
                 try {
@@ -796,14 +800,16 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                         start_seq = std::stoll(start_id.substr(dash_pos + 1));
                     }
                 } catch (...) {
-                    send(client_fd, "-ERR Invalid ID\r\n", 16, 0);
+                    std::string response = "-ERR Invalid ID format\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
                     return;
                 }
             } else {
                 try {
                     start_ms = std::stoll(start_id);
                 } catch (...) {
-                    send(client_fd, "-ERR Invalid ID\r\n", 16, 0);
+                    std::string response = "-ERR Invalid ID format\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
                     return;
                 }
             }
@@ -815,35 +821,42 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 continue;
             }
 
-            if (entry_ms < start_ms || (entry_ms == start_ms && entry_seq < start_seq)) {
-                continue;
+            if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq >= start_seq)) {
+                matched_entries.push_back(&entry);
             }
-
-            matched_entries.push_back(&entry);
         }
 
         if (!matched_entries.empty()) {
-            response += "*2\r\n";
-            response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
-            response += "*" + std::to_string(matched_entries.size()) + "\r\n";
+            has_data = true;
+            std::string stream_response = "*2\r\n";
+            stream_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
+            stream_response += "*" + std::to_string(matched_entries.size()) + "\r\n";
             
             for (const auto entry : matched_entries) {
-                response += "*2\r\n";
-                response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
-                response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
+                stream_response += "*2\r\n";
+                stream_response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
+                stream_response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
                 for (const auto& field : entry->fields) {
-                    response += "$" + std::to_string(field.first.length()) + "\r\n";
-                    response += field.first + "\r\n";
-                    response += "$" + std::to_string(field.second.length()) + "\r\n";
-                    response += field.second + "\r\n";
+                    stream_response += "$" + std::to_string(field.first.length()) + "\r\n";
+                    stream_response += field.first + "\r\n";
+                    stream_response += "$" + std::to_string(field.second.length()) + "\r\n";
+                    stream_response += field.second + "\r\n";
                 }
             }
-        } else {
-            response += "*0\r\n";
+            stream_responses.push_back(stream_response);
         }
     }
 
-    send(client_fd, response.c_str(), response.length(), 0);
+    if (has_data) {
+        std::string response = "*" + std::to_string(stream_responses.size()) + "\r\n";
+        for (const auto& resp : stream_responses) {
+            response += resp;
+        }
+        send(client_fd, response.c_str(), response.length(), 0);
+    } else {
+        std::string response = "*-1\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    }
 } else if (command == "TYPE" && parsed_command.size() == 2) {
     std::string key = parsed_command[1];
     std::string response;
