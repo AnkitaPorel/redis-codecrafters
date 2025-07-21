@@ -859,13 +859,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 
     // Handle blocking case (block_time >= 0 and no immediate data)
-    if (block_time == 0) {
-        // Block indefinitely - not handled in this simple implementation
-        send(client_fd, "*0\r\n", 4, 0);
-        return;
-    }
-
-    // Add to blocked clients for positive block_time
     if (streams.size() != 1) {
         send(client_fd, "-ERR BLOCK option is only supported for a single stream\r\n", 56, 0);
         return;
@@ -875,12 +868,15 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     auto& stream_key = stream.first;
     auto& last_id = stream.second;
     
-    // Add to blocked clients
     BlockedClient client;
     client.fd = client_fd;
     client.stream_key = stream_key;
     client.last_id = last_id;
-    client.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_time);
+    if (block_time == 0) {
+        client.expiry = std::chrono::steady_clock::time_point::max();
+    } else {
+        client.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_time);
+    }
 
     {
         std::lock_guard<std::mutex> lock(blocked_clients_mutex);
