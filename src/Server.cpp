@@ -954,7 +954,28 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "*0\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     } else {
-        std::string response = "-ERR Transaction contains no commands\r\n";
+        std::string response = "*" + std::to_string(commands.size()) + "\r\n";
+        
+        for (const auto& cmd : commands) {
+            int temp_fd = dup(client_fd);
+            int pipe_fds[2];
+            pipe(pipe_fds);
+            dup2(pipe_fds[1], client_fd);
+            
+            execute_redis_command(pipe_fds[1], cmd);
+            
+            char buf[4096];
+            ssize_t bytes = read(pipe_fds[0], buf, sizeof(buf));
+            if (bytes > 0) {
+                response += std::string(buf, bytes);
+            }
+            
+            dup2(temp_fd, client_fd);
+            close(temp_fd);
+            close(pipe_fds[0]);
+            close(pipe_fds[1]);
+        }
+        
         send(client_fd, response.c_str(), response.length(), 0);
     }
 } else if (command == "MULTI" && parsed_command.size() == 1) {
