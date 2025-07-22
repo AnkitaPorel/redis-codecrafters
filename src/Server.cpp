@@ -601,7 +601,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             std::cout << "XADD: Checking " << blocked_clients.size() << " blocked clients" << std::endl;
 
             for (auto it = blocked_clients.begin(); it != blocked_clients.end();) {
-                if (it->stream_key == stream_key) {
+                if (it->key == stream_key) {
                     long long entry_ms, entry_seq;
                     long long last_ms, last_seq;
 
@@ -885,7 +885,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     
         BlockedClient client;
         client.fd = client_fd;
-        client.stream_key = stream_key;
+        client.key = stream_key;
         client.last_id = last_id;
         if (block_time == 0) {
             client.expiry = std::chrono::steady_clock::time_point::max();
