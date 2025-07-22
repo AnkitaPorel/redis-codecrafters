@@ -1089,17 +1089,29 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     std::string key = parsed_command[1];
     std::string value = parsed_command[2];
     
-    // Create new list with the single element
-    list_store[key] = {value};
+    int list_length;
+    {
+        // Check if list exists
+        auto it = list_store.find(key);
+        if (it != list_store.end()) {
+            // Append to existing list
+            it->second.push_back(value);
+            list_length = it->second.size();
+        } else {
+            // Create new list with the single element
+            list_store[key] = {value};
+            list_length = 1;
+        }
+    }
     
-    // Return the length of the list (1)
-    std::string response = ":1\r\n";
+    // Return the length of the list
+    std::string response = ":" + std::to_string(list_length) + "\r\n";
     send(client_fd, response.c_str(), response.length(), 0);
     
     if (connected_replicas.find(client_fd) == connected_replicas.end()) {
         propagate_to_replicas(parsed_command);
     }
-    } else {
+} else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
@@ -1208,9 +1220,15 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
     std::string key = parsed_command[1];
     std::string value = parsed_command[2];
     
-    list_store[key] = {value};
-    std::cout << "Replica: RPUSH '" << key << "' = '" << value << "'" << std::endl;
+    auto it = list_store.find(key);
+    if (it != list_store.end()) {
+        it->second.push_back(value);
+    } else {
+        list_store[key] = {value};
     }
+    
+    std::cout << "Replica: RPUSH '" << key << "' = '" << value << "'" << std::endl;
+}
     
     {
         std::lock_guard<std::mutex> lock(offset_mutex);
