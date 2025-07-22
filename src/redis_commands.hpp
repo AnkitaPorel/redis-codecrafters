@@ -151,6 +151,49 @@ std::string generate_stream_id() {
     return std::to_string(last_ms) + "-" + std::to_string(seq);
 }
 
+void propagate_to_replicas(const std::vector<std::string>& command) {
+    if (is_replica || connected_replicas.empty()) {
+        return;
+    }
+    
+    if (!is_write_command(command[0])) {
+        return;
+    }
+    
+    std::string resp_command = command_to_resp_array(command);
+    int cmd_size = resp_command.size();
+    
+    {
+        std::lock_guard<std::mutex> lock(offset_mutex);
+        master_offset += cmd_size;
+    }
+    
+    std::cout << "Propagating command (" << cmd_size << " bytes) to " 
+              << connected_replicas.size() << " replicas" << std::endl;
+    
+    for (auto it = connected_replicas.begin(); it != connected_replicas.end();) {
+        int replica_fd = *it;
+        ssize_t bytes_sent = send(replica_fd, resp_command.c_str(), resp_command.length(), MSG_NOSIGNAL);
+        
+        if (bytes_sent < 0) {
+            std::lock_guard<std::mutex> lock(offset_mutex);
+            replica_offsets.erase(replica_fd);
+            replica_info.erase(replica_fd);
+            replica_ack_offsets.erase(replica_fd);
+            it = connected_replicas.erase(it);
+            std::cout << "Replica (fd: " << replica_fd << ") disconnected" << std::endl;
+        } else {
+            {
+                std::lock_guard<std::mutex> lock(wait_mutex);
+                if (replica_ack_offsets.find(replica_fd) == replica_ack_offsets.end()) {
+                    replica_ack_offsets[replica_fd] = 0;
+                }
+            }
+            ++it;
+        }
+    }
+}
+
 void check_blocked_clients_timeout() {
     while (!shutdown_server) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -229,50 +272,6 @@ bool parse_stream_id(const std::string& id, long long& ms, long long& seq) {
     }
     
     return true;
-}
-
-void propagate_to_replicas(const std::vector<std::string>& command) {
-    if (is_replica || connected_replicas.empty()) {
-        return;
-    }
-    
-    if (!is_write_command(command[0])) {
-        return;
-    }
-    
-    std::string resp_command = command_to_resp_array(command);
-    int cmd_size = resp_command.size();
-    
-    {
-        std::lock_guard<std::mutex> lock(offset_mutex);
-        master_offset += cmd_size;
-    }
-    
-    std::cout << "Propagating command (" << cmd_size << " bytes) to " 
-              << connected_replicas.size() << " replicas" << std::endl;
-    
-    for (auto it = connected_replicas.begin(); it != connected_replicas.end();) {
-        int replica_fd = *it;
-        ssize_t bytes_sent = send(replica_fd, resp_command.c_str(), resp_command.length(), MSG_NOSIGNAL);
-        
-        if (bytes_sent < 0) {
-            std::lock_guard<std::mutex> lock(offset_mutex);
-            replica_offsets.erase(replica_fd);
-            replica_info.erase(replica_fd);
-            replica_ack_offsets.erase(replica_fd);
-            it = connected_replicas.erase(it);
-            std::cout << "Replica (fd: " << replica_fd << ") disconnected" << std::endl;
-        } else {
-            // Initialize replica ACK offset if not exists
-            {
-                std::lock_guard<std::mutex> lock(wait_mutex);
-                if (replica_ack_offsets.find(replica_fd) == replica_ack_offsets.end()) {
-                    replica_ack_offsets[replica_fd] = 0;
-                }
-            }
-            ++it;
-        }
-    }
 }
 
 long long get_current_timestamp_ms() {
