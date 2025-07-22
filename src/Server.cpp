@@ -1198,6 +1198,12 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         if (connected_replicas.find(client_fd) == connected_replicas.end()) {
             propagate_to_replicas(parsed_command);
         }
+    } else if (command == "LLEN" && parsed_command.size() == 2) {
+        std::string key = parsed_command[1];
+        auto it = list_store.find(key);
+        int length = (it != list_store.end()) ? it->second.size() : 0;
+        std::string response = ":" + std::to_string(length) + "\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
