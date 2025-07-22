@@ -1204,6 +1204,29 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         int length = (it != list_store.end()) ? it->second.size() : 0;
         std::string response = ":" + std::to_string(length) + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "LPOP" && parsed_command.size() == 2) {
+        std::string key = parsed_command[1];
+        auto it = list_store.find(key);
+        
+        if (it == list_store.end() || it->second.empty()) {
+            std::string response = "$-1\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+        
+        std::string popped_value = it->second.front();
+        it->second.erase(it->second.begin());
+        
+        if (it->second.empty()) {
+            list_store.erase(it);
+        }
+        
+        std::string response = "$" + std::to_string(popped_value.length()) + "\r\n" + popped_value + "\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        
+        if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+            propagate_to_replicas(parsed_command);
+        }
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
@@ -1343,6 +1366,18 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         }
     
         std::cout << "Replica: LPUSH '" << key << "' with " << (parsed_command.size() - 2) << " elements" << std::endl;
+    } else if (command == "LPOP" && parsed_command.size() == 2) {
+        std::string key = parsed_command[1];
+        auto it = list_store.find(key);
+        
+        if (it != list_store.end() && !it->second.empty()) {
+            it->second.erase(it->second.begin());
+            if (it->second.empty()) {
+                list_store.erase(it);
+            }
+        }
+        
+        std::cout << "Replica: LPOP '" << key << "'" << std::endl;
     }
     
     {
