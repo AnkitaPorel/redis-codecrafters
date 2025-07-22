@@ -1755,6 +1755,10 @@ int main(int argc, char **argv) {
             break;
         }
 
+        kv_store.clear();
+        list_store.clear(); 
+        stream_store.clear();
+
         if (FD_ISSET(server_fd, &read_fds)) {
             struct sockaddr_in client_addr;
             socklen_t client_len = sizeof(client_addr);
