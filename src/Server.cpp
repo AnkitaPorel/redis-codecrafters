@@ -1204,24 +1204,60 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         int length = (it != list_store.end()) ? it->second.size() : 0;
         std::string response = ":" + std::to_string(length) + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
-    } else if (command == "LPOP" && parsed_command.size() == 2) {
+    } else if (command == "LPOP" && (parsed_command.size() == 2 || parsed_command.size() == 3)) {
         std::string key = parsed_command[1];
+        int count = 1;
+        
+        if (parsed_command.size() == 3) {
+            try {
+                count = std::stoi(parsed_command[2]);
+                if (count <= 0) {
+                    std::string response = "-ERR count must be greater than 0\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                    return;
+                }
+            } catch (const std::exception& e) {
+                std::string response = "-ERR value is not an integer or out of range\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+        }
+        
         auto it = list_store.find(key);
         
         if (it == list_store.end() || it->second.empty()) {
-            std::string response = "$-1\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
+            if (count == 1) {
+                std::string response = "$-1\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+            } else {
+                std::string response = "*0\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+            }
             return;
         }
         
-        std::string popped_value = it->second.front();
-        it->second.erase(it->second.begin());
+        std::vector<std::string> popped_values;
+        int actual_count = std::min(count, static_cast<int>(it->second.size()));
+        
+        for (int i = 0; i < actual_count; i++) {
+            popped_values.push_back(it->second.front());
+            it->second.erase(it->second.begin());
+        }
         
         if (it->second.empty()) {
             list_store.erase(it);
         }
         
-        std::string response = "$" + std::to_string(popped_value.length()) + "\r\n" + popped_value + "\r\n";
+        std::string response;
+        if (count == 1) {
+            response = "$" + std::to_string(popped_values[0].length()) + "\r\n" + popped_values[0] + "\r\n";
+        } else {
+            response = "*" + std::to_string(popped_values.size()) + "\r\n";
+            for (const auto& value : popped_values) {
+                response += "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
+            }
+        }
+        
         send(client_fd, response.c_str(), response.length(), 0);
         
         if (connected_replicas.find(client_fd) == connected_replicas.end()) {
@@ -1366,18 +1402,32 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         }
     
         std::cout << "Replica: LPUSH '" << key << "' with " << (parsed_command.size() - 2) << " elements" << std::endl;
-    } else if (command == "LPOP" && parsed_command.size() == 2) {
+    } else if (command == "LPOP" && (parsed_command.size() == 2 || parsed_command.size() == 3)) {
         std::string key = parsed_command[1];
+        int count = 1;
+        
+        if (parsed_command.size() == 3) {
+            try {
+                count = std::stoi(parsed_command[2]);
+            } catch (...) {
+                std::cerr << "Replica: Invalid count in LPOP command" << std::endl;
+                return "";
+            }
+        }
+        
         auto it = list_store.find(key);
         
         if (it != list_store.end() && !it->second.empty()) {
-            it->second.erase(it->second.begin());
+            int actual_count = std::min(count, static_cast<int>(it->second.size()));
+            for (int i = 0; i < actual_count; i++) {
+                it->second.erase(it->second.begin());
+            }
             if (it->second.empty()) {
                 list_store.erase(it);
             }
         }
         
-        std::cout << "Replica: LPOP '" << key << "'" << std::endl;
+        std::cout << "Replica: LPOP '" << key << "' count=" << count << std::endl;
     }
     
     {
