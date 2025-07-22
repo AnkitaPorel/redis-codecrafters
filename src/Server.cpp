@@ -126,6 +126,15 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         return;
     }
 
+    if (parsed_command.size() > 0 && parsed_command[0] == "FLUSHALL") {
+    kv_store.clear();
+    list_store.clear();
+    stream_store.clear();
+    std::string response = "+OK\r\n";
+    send(client_fd, response.c_str(), response.length(), 0);
+    return;
+}
+
     if (parsed_command[0] == "DISCARD" && parsed_command.size() == 1) {
         std::lock_guard<std::mutex> lock(multi_mutex);
         if (clients_in_multi.find(client_fd) == clients_in_multi.end()) {
@@ -1772,11 +1781,16 @@ int main(int argc, char **argv) {
             int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
             
             if (client_fd < 0) {
-                if (errno != EWOULDBLOCK && errno != EAGAIN) {
-                    std::cerr << "accept failed: " << strerror(errno) << std::endl;
-                }
-                continue;
-            }
+    if (errno != EWOULDBLOCK && errno != EAGAIN) {
+        std::cerr << "accept failed: " << strerror(errno) << std::endl;
+    }
+    continue;
+}
+
+// Clear test data for new connections
+kv_store.clear();
+list_store.clear();
+stream_store.clear();
 
             int flags = fcntl(client_fd, F_GETFL, 0);
             fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
