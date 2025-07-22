@@ -127,13 +127,13 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 
     if (parsed_command.size() > 0 && parsed_command[0] == "FLUSHALL") {
-    kv_store.clear();
-    list_store.clear();
-    stream_store.clear();
-    std::string response = "+OK\r\n";
-    send(client_fd, response.c_str(), response.length(), 0);
-    return;
-}
+        kv_store.clear();
+        list_store.clear();
+        stream_store.clear();
+        std::string response = "+OK\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+        return;
+    }
 
     if (parsed_command[0] == "DISCARD" && parsed_command.size() == 1) {
         std::lock_guard<std::mutex> lock(multi_mutex);
@@ -625,9 +625,9 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
         }
 
-            std::cout << "XADD: Will unblock " << to_unblock.size() << " clients" << std::endl;
+        std::cout << "XADD: Will unblock " << to_unblock.size() << " clients" << std::endl;
 
-            for (const auto& client : to_unblock) {
+        for (const auto& client : to_unblock) {
             std::string unblock_response = "*1\r\n*2\r\n";
             unblock_response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
             unblock_response += "*1\r\n*2\r\n";
@@ -831,389 +831,376 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 }
             }
 
-        std::vector<const StreamEntry*> matches;
-        for (const auto& entry : stream_it->second.entries) {
-            long long entry_ms, entry_seq;
-            if (!parse_stream_id(entry.id, entry_ms, entry_seq)) continue;
+            std::vector<const StreamEntry*> matches;
+            for (const auto& entry : stream_it->second.entries) {
+                long long entry_ms, entry_seq;
+                if (!parse_stream_id(entry.id, entry_ms, entry_seq)) continue;
 
-            if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
-                matches.push_back(&entry);
-            }
-        }
-
-        if (!matches.empty()) {
-            has_data = true;
-            std::string response = "*2\r\n";
-            response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
-            response += "*" + std::to_string(matches.size()) + "\r\n";
-
-            for (const auto entry : matches) {
-                response += "*2\r\n";
-                response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
-                response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
-                for (const auto& [field, value] : entry->fields) {
-                    response += "$" + std::to_string(field.length()) + "\r\n" + field + "\r\n";
-                    response += "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
+                if (entry_ms > start_ms || (entry_ms == start_ms && entry_seq > start_seq)) {
+                    matches.push_back(&entry);
                 }
             }
 
-            responses.push_back(response);
-        }
-    }
+            if (!matches.empty()) {
+                has_data = true;
+                std::string response = "*2\r\n";
+                response += "$" + std::to_string(stream_key.length()) + "\r\n" + stream_key + "\r\n";
+                response += "*" + std::to_string(matches.size()) + "\r\n";
 
-    if (has_data || block_time < 0) {
-        if (has_data) {
-            std::string final_response = "*" + std::to_string(responses.size()) + "\r\n";
-            for (const auto& resp : responses) {
-                final_response += resp;
+                for (const auto entry : matches) {
+                    response += "*2\r\n";
+                    response += "$" + std::to_string(entry->id.length()) + "\r\n" + entry->id + "\r\n";
+                    response += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
+                    for (const auto& [field, value] : entry->fields) {
+                        response += "$" + std::to_string(field.length()) + "\r\n" + field + "\r\n";
+                        response += "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
+                    }
+                }
+
+                responses.push_back(response);
             }
-            send(client_fd, final_response.c_str(), final_response.length(), 0);
-        } else {
-            send(client_fd, "*0\r\n", 4, 0);
         }
-        return;
-    }
 
-    if (streams.size() != 1) {
-        send(client_fd, "-ERR BLOCK option is only supported for a single stream\r\n", 56, 0);
-        return;
-    }
+        if (has_data || block_time < 0) {
+            if (has_data) {
+                std::string final_response = "*" + std::to_string(responses.size()) + "\r\n";
+                for (const auto& resp : responses) {
+                    final_response += resp;
+                }
+                send(client_fd, final_response.c_str(), final_response.length(), 0);
+            } else {
+                send(client_fd, "*0\r\n", 4, 0);
+            }
+            return;
+        }
 
-    auto& stream = streams[0];
-    auto& stream_key = stream.first;
-    auto& last_id = stream.second;
+        if (streams.size() != 1) {
+            send(client_fd, "-ERR BLOCK option is only supported for a single stream\r\n", 56, 0);
+            return;
+        }
+
+        auto& stream = streams[0];
+        auto& stream_key = stream.first;
+        auto& last_id = stream.second;
     
-    BlockedClient client;
-    client.fd = client_fd;
-    client.stream_key = stream_key;
-    client.last_id = last_id;
-    if (block_time == 0) {
-        client.expiry = std::chrono::steady_clock::time_point::max();
-    } else {
-        client.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_time);
-    }
+        BlockedClient client;
+        client.fd = client_fd;
+        client.stream_key = stream_key;
+        client.last_id = last_id;
+        if (block_time == 0) {
+            client.expiry = std::chrono::steady_clock::time_point::max();
+        } else {
+            client.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_time);
+        }
 
-    {
-        std::lock_guard<std::mutex> lock(blocked_clients_mutex);
-        blocked_clients.push_back(client);
-        std::cout << "XREAD: Blocking client fd=" << client_fd 
+        {
+            std::lock_guard<std::mutex> lock(blocked_clients_mutex);
+            blocked_clients.push_back(client);
+            std::cout << "XREAD: Blocking client fd=" << client_fd 
                   << " on stream '" << stream_key 
                   << "' with last_id '" << last_id << "'" << std::endl;
-    }
-} else if (command == "TYPE" && parsed_command.size() == 2) {
-    std::string key = parsed_command[1];
-    std::string response;
-    
-    auto stream_it = stream_store.find(key);
-    if (stream_it != stream_store.end()) {
-        if (stream_it->second.has_expiry && get_current_time() > stream_it->second.expiry) {
-            stream_store.erase(stream_it);
-            response = "+none\r\n";
-        } else {
-            response = "+stream\r\n";
         }
-    } else {
-        auto kv_it = kv_store.find(key);
-        if (kv_it != kv_store.end()) {
-            if (kv_it->second.has_expiry && get_current_time() > kv_it->second.expiry) {
-                kv_store.erase(kv_it);
+    } else if (command == "TYPE" && parsed_command.size() == 2) {
+        std::string key = parsed_command[1];
+        std::string response;
+    
+        auto stream_it = stream_store.find(key);
+        if (stream_it != stream_store.end()) {
+            if (stream_it->second.has_expiry && get_current_time() > stream_it->second.expiry) {
+                stream_store.erase(stream_it);
                 response = "+none\r\n";
             } else {
-                response = "+string\r\n";
+                response = "+stream\r\n";
             }
         } else {
-            auto list_it = list_store.find(key);
-            if (list_it != list_store.end()) {
-                response = "+list\r\n";
+            auto kv_it = kv_store.find(key);
+            if (kv_it != kv_store.end()) {
+                if (kv_it->second.has_expiry && get_current_time() > kv_it->second.expiry) {
+                    kv_store.erase(kv_it);
+                    response = "+none\r\n";
+                } else {
+                    response = "+string\r\n";
+                }
             } else {
-                response = "+none\r\n";
+                auto list_it = list_store.find(key);
+                if (list_it != list_store.end()) {
+                    response = "+list\r\n";
+                } else {
+                    response = "+none\r\n";
+                }
             }
         }
-    }
     
-    send(client_fd, response.c_str(), response.length(), 0);
+        send(client_fd, response.c_str(), response.length(), 0);
     } else if (command == "INCR" && parsed_command.size() == 2) {
-    std::string key = parsed_command[1];
-    auto it = kv_store.find(key);
+        std::string key = parsed_command[1];
+        auto it = kv_store.find(key);
     
-    if (it != kv_store.end()) {
-        try {
-            long long value = std::stoll(it->second.value);
-            value++;
-            it->second.value = std::to_string(value);
+        if (it != kv_store.end()) {
+            try {
+                long long value = std::stoll(it->second.value);
+                value++;
+                it->second.value = std::to_string(value);
             
-            std::string response = ":" + std::to_string(value) + "\r\n";
+                std::string response = ":" + std::to_string(value) + "\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+            
+                if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+                    propagate_to_replicas(parsed_command);
+                }
+            } catch (const std::exception& e) {
+                std::string response = "-ERR value is not an integer or out of range\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+            }
+        } else {
+            kv_store[key] = ValueEntry("1");
+        
+            std::string response = ":1\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
-            
+        
             if (connected_replicas.find(client_fd) == connected_replicas.end()) {
                 propagate_to_replicas(parsed_command);
             }
+        }
+    } else if (command == "EXEC" && parsed_command.size() == 1) {
+        {
+            std::lock_guard<std::mutex> lock(multi_mutex);
+            if (clients_in_multi.find(client_fd) == clients_in_multi.end()) {
+                std::string response = "-ERR EXEC without MULTI\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+            clients_in_multi.erase(client_fd);
+        }
+    
+        std::vector<std::vector<std::string>> commands;
+        {
+            std::lock_guard<std::mutex> qlock(queue_mutex);
+            commands = queued_commands[client_fd];
+            queued_commands.erase(client_fd);
+        }
+    
+        std::string response = "*" + std::to_string(commands.size()) + "\r\n";
+    
+        for (const auto& cmd : commands) {
+            if (cmd.empty()) {
+                response += "+OK\r\n";
+                continue;
+            }
+        
+            std::string command_name = cmd[0];
+        
+            if (command_name == "SET" && (cmd.size() == 3 || cmd.size() == 5)) {
+                std::string key = cmd[1];
+                std::string value = cmd[2];
+            
+                if (cmd.size() == 3) {
+                    kv_store[key] = ValueEntry(value);
+                    response += "+OK\r\n";
+                } else if (cmd.size() == 5) {
+                    std::string px_arg = cmd[3];
+                    for (char& c : px_arg) {
+                        c = std::toupper(c);
+                    }
+                    if (px_arg == "PX") {
+                        try {
+                            long expiry_ms = std::stol(cmd[4]);
+                            if (expiry_ms <= 0) {
+                                response += "-ERR invalid expire time\r\n";
+                            } else {
+                                auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
+                                kv_store[key] = ValueEntry(value, expiry_time);
+                                response += "+OK\r\n";
+                            }
+                        } catch (const std::exception& e) {
+                            response += "-ERR invalid expire time\r\n";
+                        }
+                    } else {
+                        response += "-ERR syntax error\r\n";
+                    }
+                }
+            
+                if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+                    propagate_to_replicas(cmd);
+                }
+            
+            } else if (command_name == "GET" && cmd.size() == 2) {
+                std::string key = cmd[1];
+                auto it = kv_store.find(key);
+                if (it != kv_store.end()) {
+                    if (it->second.has_expiry && get_current_time() > it->second.expiry) {
+                        kv_store.erase(it);
+                        response += "$-1\r\n";
+                    } else {
+                        std::string value = it->second.value;
+                        response += "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
+                    }
+                } else {
+                    response += "$-1\r\n";
+                }
+            
+            } else if (command_name == "INCR" && cmd.size() == 2) {
+                std::string key = cmd[1];
+                auto it = kv_store.find(key);
+            
+                if (it != kv_store.end()) {
+                    try {
+                        long long value = std::stoll(it->second.value);
+                        value++;
+                        it->second.value = std::to_string(value);
+                        response += ":" + std::to_string(value) + "\r\n";
+                    } catch (const std::exception& e) {
+                        response += "-ERR value is not an integer or out of range\r\n";
+                    }
+                } else {
+                    kv_store[key] = ValueEntry("1");
+                    response += ":1\r\n";
+                }
+            
+                if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+                    propagate_to_replicas(cmd);
+                }
+            
+            } else {
+                response += "+OK\r\n";
+            }
+        }
+    
+        send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "MULTI" && parsed_command.size() == 1) {
+        {
+            std::lock_guard<std::mutex> lock(multi_mutex);
+            clients_in_multi.insert(client_fd);
+            {
+                std::lock_guard<std::mutex> qlock(queue_mutex);
+                queued_commands[client_fd].clear();
+            }
+        }
+        std::string response = "+OK\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "DISCARD" && parsed_command.size() == 1) {
+        {
+            std::lock_guard<std::mutex> lock(multi_mutex);
+            if (clients_in_multi.find(client_fd) == clients_in_multi.end()) {
+                std::string response = "-ERR DISCARD without MULTI\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+                return;
+            }
+            clients_in_multi.erase(client_fd);
+            {
+                std::lock_guard<std::mutex> qlock(queue_mutex);
+                queued_commands[client_fd].clear();
+            }
+        }
+        std::string response = "+OK\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    } else if (command == "RPUSH" && parsed_command.size() >= 3) {
+        std::string key = parsed_command[1];
+        int elements_to_add = parsed_command.size() - 2;
+        int list_length;
+    
+        {
+            auto it = list_store.find(key);
+            if (it != list_store.end()) {
+                for (int i = 2; i < parsed_command.size(); i++) {
+                    it->second.push_back(parsed_command[i]);
+                }
+                list_length = it->second.size();
+            } else {
+                std::vector<std::string> new_list;
+                for (int i = 2; i < parsed_command.size(); i++) {
+                    new_list.push_back(parsed_command[i]);
+                }
+                list_store[key] = new_list;
+                list_length = new_list.size();
+            }
+        }
+    
+        std::string response = ":" + std::to_string(list_length) + "\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    
+        if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+            propagate_to_replicas(parsed_command);
+        }
+    } else if (command == "LRANGE" && parsed_command.size() == 4) {
+        std::string key = parsed_command[1];
+    
+        try {
+            int start = std::stoi(parsed_command[2]);
+            int end = std::stoi(parsed_command[3]);
+        
+            auto it = list_store.find(key);
+            if (it == list_store.end()) {
+                send(client_fd, "*0\r\n", 4, 0);
+                return;
+            }
+        
+            const auto& list = it->second;
+            int list_size = list.size();
+        
+            if (start < 0) {
+                start = list_size + start;
+                if (start < 0) start = 0;
+            }
+        
+            if (end < 0) {
+                end = list_size + end;
+                if (end < 0) end = 0;
+            }
+        
+            if (start >= list_size) {
+                send(client_fd, "*0\r\n", 4, 0);
+                return;
+            }
+        
+            if (end >= list_size) {
+                end = list_size - 1;
+            }
+        
+            if (start > end) {
+                send(client_fd, "*0\r\n", 4, 0);
+                return;
+            }
+        
+            int count = end - start + 1;
+            std::string response = "*" + std::to_string(count) + "\r\n";
+        
+            for (int i = start; i <= end; i++) {
+                const std::string& element = list[i];
+                response += "$" + std::to_string(element.length()) + "\r\n" + element + "\r\n";
+            }
+        
+            send(client_fd, response.c_str(), response.length(), 0);
         } catch (const std::exception& e) {
             std::string response = "-ERR value is not an integer or out of range\r\n";
             send(client_fd, response.c_str(), response.length(), 0);
         }
-    } else {
-        kv_store[key] = ValueEntry("1");
-        
-        std::string response = ":1\r\n";
+    } else if (command == "LPUSH" && parsed_command.size() >= 3) {
+        std::string key = parsed_command[1];
+        int elements_to_add = parsed_command.size() - 2;
+        int list_length;
+    
+        {
+            auto it = list_store.find(key);
+            if (it != list_store.end()) {
+                it->second.insert(it->second.begin(), 
+                            parsed_command.begin() + 2, 
+                            parsed_command.end());
+                list_length = it->second.size();
+            } else {
+                std::vector<std::string> new_list(parsed_command.begin() + 2, parsed_command.end());
+                list_store[key] = new_list;
+                list_length = new_list.size();
+            }
+        }
+    
+        std::string response = ":" + std::to_string(list_length) + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
-        
+    
         if (connected_replicas.find(client_fd) == connected_replicas.end()) {
             propagate_to_replicas(parsed_command);
         }
-    }
-} else if (command == "EXEC" && parsed_command.size() == 1) {
-    {
-        std::lock_guard<std::mutex> lock(multi_mutex);
-        if (clients_in_multi.find(client_fd) == clients_in_multi.end()) {
-            std::string response = "-ERR EXEC without MULTI\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
-        }
-        clients_in_multi.erase(client_fd);
-    }
-    
-    std::vector<std::vector<std::string>> commands;
-    {
-        std::lock_guard<std::mutex> qlock(queue_mutex);
-        commands = queued_commands[client_fd];
-        queued_commands.erase(client_fd);
-    }
-    
-    std::string response = "*" + std::to_string(commands.size()) + "\r\n";
-    
-    for (const auto& cmd : commands) {
-        if (cmd.empty()) {
-            response += "+OK\r\n";
-            continue;
-        }
-        
-        std::string command_name = cmd[0];
-        
-        if (command_name == "SET" && (cmd.size() == 3 || cmd.size() == 5)) {
-            std::string key = cmd[1];
-            std::string value = cmd[2];
-            
-            if (cmd.size() == 3) {
-                kv_store[key] = ValueEntry(value);
-                response += "+OK\r\n";
-            } else if (cmd.size() == 5) {
-                std::string px_arg = cmd[3];
-                for (char& c : px_arg) {
-                    c = std::toupper(c);
-                }
-                if (px_arg == "PX") {
-                    try {
-                        long expiry_ms = std::stol(cmd[4]);
-                        if (expiry_ms <= 0) {
-                            response += "-ERR invalid expire time\r\n";
-                        } else {
-                            auto expiry_time = get_current_time() + std::chrono::milliseconds(expiry_ms);
-                            kv_store[key] = ValueEntry(value, expiry_time);
-                            response += "+OK\r\n";
-                        }
-                    } catch (const std::exception& e) {
-                        response += "-ERR invalid expire time\r\n";
-                    }
-                } else {
-                    response += "-ERR syntax error\r\n";
-                }
-            }
-            
-            if (connected_replicas.find(client_fd) == connected_replicas.end()) {
-                propagate_to_replicas(cmd);
-            }
-            
-        } else if (command_name == "GET" && cmd.size() == 2) {
-            std::string key = cmd[1];
-            auto it = kv_store.find(key);
-            if (it != kv_store.end()) {
-                if (it->second.has_expiry && get_current_time() > it->second.expiry) {
-                    kv_store.erase(it);
-                    response += "$-1\r\n";
-                } else {
-                    std::string value = it->second.value;
-                    response += "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
-                }
-            } else {
-                response += "$-1\r\n";
-            }
-            
-        } else if (command_name == "INCR" && cmd.size() == 2) {
-            std::string key = cmd[1];
-            auto it = kv_store.find(key);
-            
-            if (it != kv_store.end()) {
-                try {
-                    long long value = std::stoll(it->second.value);
-                    value++;
-                    it->second.value = std::to_string(value);
-                    response += ":" + std::to_string(value) + "\r\n";
-                } catch (const std::exception& e) {
-                    response += "-ERR value is not an integer or out of range\r\n";
-                }
-            } else {
-                kv_store[key] = ValueEntry("1");
-                response += ":1\r\n";
-            }
-            
-            if (connected_replicas.find(client_fd) == connected_replicas.end()) {
-                propagate_to_replicas(cmd);
-            }
-            
-        } else {
-            response += "+OK\r\n";
-        }
-    }
-    
-    send(client_fd, response.c_str(), response.length(), 0);
-} else if (command == "MULTI" && parsed_command.size() == 1) {
-    {
-        std::lock_guard<std::mutex> lock(multi_mutex);
-        clients_in_multi.insert(client_fd);
-        {
-            std::lock_guard<std::mutex> qlock(queue_mutex);
-            queued_commands[client_fd].clear();
-        }
-    }
-    std::string response = "+OK\r\n";
-    send(client_fd, response.c_str(), response.length(), 0);
-} else if (command == "DISCARD" && parsed_command.size() == 1) {
-    {
-        std::lock_guard<std::mutex> lock(multi_mutex);
-        if (clients_in_multi.find(client_fd) == clients_in_multi.end()) {
-            std::string response = "-ERR DISCARD without MULTI\r\n";
-            send(client_fd, response.c_str(), response.length(), 0);
-            return;
-        }
-        clients_in_multi.erase(client_fd);
-        {
-            std::lock_guard<std::mutex> qlock(queue_mutex);
-            queued_commands[client_fd].clear();
-        }
-    }
-    std::string response = "+OK\r\n";
-    send(client_fd, response.c_str(), response.length(), 0);
-} else if (command == "RPUSH" && parsed_command.size() >= 3) {
-    std::string key = parsed_command[1];
-    int elements_to_add = parsed_command.size() - 2;
-    int list_length;
-    
-    {
-        // Check if list exists
-        auto it = list_store.find(key);
-        if (it != list_store.end()) {
-            // Append all new elements to existing list
-            for (int i = 2; i < parsed_command.size(); i++) {
-                it->second.push_back(parsed_command[i]);
-            }
-            list_length = it->second.size();
-        } else {
-            // Create new list with all elements
-            std::vector<std::string> new_list;
-            for (int i = 2; i < parsed_command.size(); i++) {
-                new_list.push_back(parsed_command[i]);
-            }
-            list_store[key] = new_list;
-            list_length = new_list.size();
-        }
-    }
-    
-    // Return the length of the list after appending
-    std::string response = ":" + std::to_string(list_length) + "\r\n";
-    send(client_fd, response.c_str(), response.length(), 0);
-    
-    if (connected_replicas.find(client_fd) == connected_replicas.end()) {
-        propagate_to_replicas(parsed_command);
-    }
-} else if (command == "LRANGE" && parsed_command.size() == 4) {
-    std::string key = parsed_command[1];
-    
-    try {
-        int start = std::stoi(parsed_command[2]);
-        int end = std::stoi(parsed_command[3]);
-        
-        auto it = list_store.find(key);
-        if (it == list_store.end()) {
-            // Key doesn't exist, return empty array
-            send(client_fd, "*0\r\n", 4, 0);
-            return;
-        }
-        
-        const auto& list = it->second;
-        int list_size = list.size();
-        
-        // Handle negative indices
-        if (start < 0) {
-            start = list_size + start;
-            if (start < 0) start = 0;
-        }
-        
-        if (end < 0) {
-            end = list_size + end;
-            if (end < 0) end = 0;
-        }
-        
-        // Bounds checking
-        if (start >= list_size) {
-            send(client_fd, "*0\r\n", 4, 0);
-            return;
-        }
-        
-        if (end >= list_size) {
-            end = list_size - 1;
-        }
-        
-        // Check if range is valid
-        if (start > end) {
-            send(client_fd, "*0\r\n", 4, 0);
-            return;
-        }
-        
-        // Build the response
-        int count = end - start + 1;
-        std::string response = "*" + std::to_string(count) + "\r\n";
-        
-        for (int i = start; i <= end; i++) {
-            const std::string& element = list[i];
-            response += "$" + std::to_string(element.length()) + "\r\n" + element + "\r\n";
-        }
-        
-        send(client_fd, response.c_str(), response.length(), 0);
-    } catch (const std::exception& e) {
-        std::string response = "-ERR value is not an integer or out of range\r\n";
-        send(client_fd, response.c_str(), response.length(), 0);
-    }
-} else if (command == "LPUSH" && parsed_command.size() >= 3) {
-    std::string key = parsed_command[1];
-    int elements_to_add = parsed_command.size() - 2;
-    int list_length;
-    
-    {
-        // Check if list exists
-        auto it = list_store.find(key);
-        if (it != list_store.end()) {
-            // Insert all new elements at once at the beginning in the correct order
-            it->second.insert(it->second.begin(), 
-                            parsed_command.begin() + 2, 
-                            parsed_command.end());
-            list_length = it->second.size();
-        } else {
-            // Create new list with all elements in original order
-            std::vector<std::string> new_list(parsed_command.begin() + 2, parsed_command.end());
-            list_store[key] = new_list;
-            list_length = new_list.size();
-        }
-    }
-    
-    // Return the length of the list after prepending
-    std::string response = ":" + std::to_string(list_length) + "\r\n";
-    send(client_fd, response.c_str(), response.length(), 0);
-    
-    if (connected_replicas.find(client_fd) == connected_replicas.end()) {
-        propagate_to_replicas(parsed_command);
-    }
-} else {
+    } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
@@ -1284,20 +1271,20 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
     } else if (command == "PING") {
         std::cout << "Replica: Received PING" << std::endl;
     } else if (command == "INCR" && parsed_command.size() == 2) {
-    std::string key = parsed_command[1];
-    auto it = kv_store.find(key);
+        std::string key = parsed_command[1];
+        auto it = kv_store.find(key);
     
-    if (it != kv_store.end()) {
-        try {
-            long long value = std::stoll(it->second.value);
-            value++;
-            it->second.value = std::to_string(value);
-            std::cout << "Replica: INCR '" << key << "' = " << value << std::endl;
-        } catch (...) {
-            std::cerr << "Replica: INCR failed - value is not an integer" << std::endl;
+        if (it != kv_store.end()) {
+            try {
+                long long value = std::stoll(it->second.value);
+                value++;
+                it->second.value = std::to_string(value);
+                std::cout << "Replica: INCR '" << key << "' = " << value << std::endl;
+            } catch (...) {
+                std::cerr << "Replica: INCR failed - value is not an integer" << std::endl;
+            }
         }
-    }
-} else if (command == "XADD" && parsed_command.size() >= 5 && (parsed_command.size() % 2 == 1)) {
+    } else if (command == "XADD" && parsed_command.size() >= 5 && (parsed_command.size() % 2 == 1)) {
         std::string stream_key = parsed_command[1];
         std::string entry_id = parsed_command[2];
         
@@ -1319,44 +1306,40 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         
         stream_store[stream_key].entries.push_back(new_entry);
     } else if (command == "RPUSH" && parsed_command.size() >= 3) {
-    std::string key = parsed_command[1];
+        std::string key = parsed_command[1];
     
-    auto it = list_store.find(key);
-    if (it != list_store.end()) {
-        // Append all elements to existing list
-        for (size_t i = 2; i < parsed_command.size(); i++) {
-            it->second.push_back(parsed_command[i]);
+        auto it = list_store.find(key);
+        if (it != list_store.end()) {
+            for (size_t i = 2; i < parsed_command.size(); i++) {
+                it->second.push_back(parsed_command[i]);
+            }
+        } else {
+            std::vector<std::string> new_list;
+            for (size_t i = 2; i < parsed_command.size(); i++) {
+                new_list.push_back(parsed_command[i]);
+            }
+            list_store[key] = new_list;
         }
-    } else {
-        // Create new list with all elements
-        std::vector<std::string> new_list;
-        for (size_t i = 2; i < parsed_command.size(); i++) {
-            new_list.push_back(parsed_command[i]);
+    
+        std::cout << "Replica: RPUSH '" << key << "' with " << (parsed_command.size() - 2) << " elements" << std::endl;
+    } else if (command == "LPUSH" && parsed_command.size() >= 3) {
+        std::string key = parsed_command[1];
+    
+        auto it = list_store.find(key);
+        if (it != list_store.end()) {
+            for (int i = parsed_command.size() - 1; i >= 2; i--) {
+                it->second.insert(it->second.begin(), parsed_command[i]);
+            }
+        } else {
+            std::vector<std::string> new_list;
+            for (size_t i = 2; i < parsed_command.size(); i++) {
+                new_list.push_back(parsed_command[i]);
+            }
+            list_store[key] = new_list;
         }
-        list_store[key] = new_list;
+    
+        std::cout << "Replica: LPUSH '" << key << "' with " << (parsed_command.size() - 2) << " elements" << std::endl;
     }
-    
-    std::cout << "Replica: RPUSH '" << key << "' with " << (parsed_command.size() - 2) << " elements" << std::endl;
-} else if (command == "LPUSH" && parsed_command.size() >= 3) {
-    std::string key = parsed_command[1];
-    
-    auto it = list_store.find(key);
-    if (it != list_store.end()) {
-        // Prepend all elements to existing list (in reverse order to maintain input order)
-        for (int i = parsed_command.size() - 1; i >= 2; i--) {
-            it->second.insert(it->second.begin(), parsed_command[i]);
-        }
-    } else {
-        // Create new list with all elements
-        std::vector<std::string> new_list;
-        for (size_t i = 2; i < parsed_command.size(); i++) {
-            new_list.push_back(parsed_command[i]);
-        }
-        list_store[key] = new_list;
-    }
-    
-    std::cout << "Replica: LPUSH '" << key << "' with " << (parsed_command.size() - 2) << " elements" << std::endl;
-}
     
     {
         std::lock_guard<std::mutex> lock(offset_mutex);
@@ -1776,18 +1759,13 @@ int main(int argc, char **argv) {
             struct sockaddr_in client_addr;
             socklen_t client_len = sizeof(client_addr);
             int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
-            
+    
             if (client_fd < 0) {
-    if (errno != EWOULDBLOCK && errno != EAGAIN) {
-        std::cerr << "accept failed: " << strerror(errno) << std::endl;
-    }
-    continue;
-}
-
-// Clear test data for new connections
-kv_store.clear();
-list_store.clear();
-stream_store.clear();
+                if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                    std::cerr << "accept failed: " << strerror(errno) << std::endl;
+                }
+                continue;
+            }
 
             int flags = fcntl(client_fd, F_GETFL, 0);
             fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
