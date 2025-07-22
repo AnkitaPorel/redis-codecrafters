@@ -121,7 +121,7 @@ std::chrono::steady_clock::time_point get_current_time() {
 
 bool is_write_command(const std::string& command) {
     return (command == "SET" || command == "DEL" || command == "INCR" || command == "DECR" || 
-            command == "LPUSH" || command == "RPUSH" || command == "LPOP" || command == "RPOP" || command == "BLPOP"
+            command == "LPUSH" || command == "RPUSH" || command == "LPOP" || command == "RPOP" || command == "BLPOP" ||
             command == "SADD" || command == "SREM" || command == "HSET" || command == "HDEL" || command == "XADD" || command == "LRANGE");
 }
 
