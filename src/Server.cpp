@@ -1085,26 +1085,32 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
     std::string response = "+OK\r\n";
     send(client_fd, response.c_str(), response.length(), 0);
-} else if (command == "RPUSH" && parsed_command.size() == 3) {
+} else if (command == "RPUSH" && parsed_command.size() >= 3) {
     std::string key = parsed_command[1];
-    std::string value = parsed_command[2];
-    
+    int elements_to_add = parsed_command.size() - 2;
     int list_length;
+    
     {
         // Check if list exists
         auto it = list_store.find(key);
         if (it != list_store.end()) {
-            // Append to existing list
-            it->second.push_back(value);
+            // Append all new elements to existing list
+            for (int i = 2; i < parsed_command.size(); i++) {
+                it->second.push_back(parsed_command[i]);
+            }
             list_length = it->second.size();
         } else {
-            // Create new list with the single element
-            list_store[key] = {value};
-            list_length = 1;
+            // Create new list with all elements
+            std::vector<std::string> new_list;
+            for (int i = 2; i < parsed_command.size(); i++) {
+                new_list.push_back(parsed_command[i]);
+            }
+            list_store[key] = new_list;
+            list_length = new_list.size();
         }
     }
     
-    // Return the length of the list
+    // Return the length of the list after appending
     std::string response = ":" + std::to_string(list_length) + "\r\n";
     send(client_fd, response.c_str(), response.length(), 0);
     
@@ -1216,18 +1222,25 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
         std::cout << std::endl;
         
         stream_store[stream_key].entries.push_back(new_entry);
-    } else if (command == "RPUSH" && parsed_command.size() == 3) {
+    } else if (command == "RPUSH" && parsed_command.size() >= 3) {
     std::string key = parsed_command[1];
-    std::string value = parsed_command[2];
     
     auto it = list_store.find(key);
     if (it != list_store.end()) {
-        it->second.push_back(value);
+        // Append all elements to existing list
+        for (size_t i = 2; i < parsed_command.size(); i++) {
+            it->second.push_back(parsed_command[i]);
+        }
     } else {
-        list_store[key] = {value};
+        // Create new list with all elements
+        std::vector<std::string> new_list;
+        for (size_t i = 2; i < parsed_command.size(); i++) {
+            new_list.push_back(parsed_command[i]);
+        }
+        list_store[key] = new_list;
     }
     
-    std::cout << "Replica: RPUSH '" << key << "' = '" << value << "'" << std::endl;
+    std::cout << "Replica: RPUSH '" << key << "' with " << (parsed_command.size() - 2) << " elements" << std::endl;
 }
     
     {
