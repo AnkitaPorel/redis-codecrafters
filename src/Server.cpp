@@ -1175,7 +1175,39 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string response = "-ERR value is not an integer or out of range\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
-} else {
+} else if (command == "LPUSH" && parsed_command.size() >= 3) {
+    std::string key = parsed_command[1];
+    int elements_to_add = parsed_command.size() - 2;
+    int list_length;
+    
+    {
+        // Check if list exists
+        auto it = list_store.find(key);
+        if (it != list_store.end()) {
+            // Prepend all new elements to existing list (in reverse order to maintain input order)
+            for (int i = parsed_command.size() - 1; i >= 2; i--) {
+                it->second.insert(it->second.begin(), parsed_command[i]);
+            }
+            list_length = it->second.size();
+        } else {
+            // Create new list with all elements
+            std::vector<std::string> new_list;
+            for (int i = 2; i < parsed_command.size(); i++) {
+                new_list.push_back(parsed_command[i]);
+            }
+            list_store[key] = new_list;
+            list_length = new_list.size();
+        }
+    }
+    
+    // Return the length of the list after prepending
+    std::string response = ":" + std::to_string(list_length) + "\r\n";
+    send(client_fd, response.c_str(), response.length(), 0);
+    
+    if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+        propagate_to_replicas(parsed_command);
+    }
+ } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
     }
@@ -1299,6 +1331,25 @@ std::string execute_replica_command(const std::vector<std::string>& parsed_comma
     }
     
     std::cout << "Replica: RPUSH '" << key << "' with " << (parsed_command.size() - 2) << " elements" << std::endl;
+} else if (command == "LPUSH" && parsed_command.size() >= 3) {
+    std::string key = parsed_command[1];
+    
+    auto it = list_store.find(key);
+    if (it != list_store.end()) {
+        // Prepend all elements to existing list (in reverse order to maintain input order)
+        for (int i = parsed_command.size() - 1; i >= 2; i--) {
+            it->second.insert(it->second.begin(), parsed_command[i]);
+        }
+    } else {
+        // Create new list with all elements
+        std::vector<std::string> new_list;
+        for (size_t i = 2; i < parsed_command.size(); i++) {
+            new_list.push_back(parsed_command[i]);
+        }
+        list_store[key] = new_list;
+    }
+    
+    std::cout << "Replica: LPUSH '" << key << "' with " << (parsed_command.size() - 2) << " elements" << std::endl;
 }
     
     {
