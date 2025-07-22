@@ -66,7 +66,7 @@ struct StreamData {
 
 struct BlockedClient {
     int fd;
-    std::string stream_key;
+    std::string key;
     std::string last_id;
     bool is_list_block;
     std::chrono::steady_clock::time_point expiry;
