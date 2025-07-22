@@ -1754,9 +1754,6 @@ int main(int argc, char **argv) {
         }
 
         if (FD_ISSET(server_fd, &read_fds)) {
-            kv_store.clear();
-            list_store.clear(); 
-            stream_store.clear();
             struct sockaddr_in client_addr;
             socklen_t client_len = sizeof(client_addr);
             int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
