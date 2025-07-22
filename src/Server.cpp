@@ -1177,26 +1177,24 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
     } else if (command == "LPUSH" && parsed_command.size() >= 3) {
         std::string key = parsed_command[1];
-        int elements_to_add = parsed_command.size() - 2;
+        std::vector<std::string> values(parsed_command.begin() + 2, parsed_command.end());
+        std::reverse(values.begin(), values.end());
         int list_length;
-    
+
         {
             auto it = list_store.find(key);
             if (it != list_store.end()) {
-                it->second.insert(it->second.begin(), 
-                            parsed_command.begin() + 2, 
-                            parsed_command.end());
+                it->second.insert(it->second.begin(), values.begin(), values.end());
                 list_length = it->second.size();
             } else {
-                std::vector<std::string> new_list(parsed_command.begin() + 2, parsed_command.end());
-                list_store[key] = new_list;
-                list_length = new_list.size();
+                list_store[key] = values;
+                list_length = values.size();
             }
         }
-    
+
         std::string response = ":" + std::to_string(list_length) + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
-    
+
         if (connected_replicas.find(client_fd) == connected_replicas.end()) {
             propagate_to_replicas(parsed_command);
         }
