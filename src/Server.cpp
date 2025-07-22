@@ -1199,7 +1199,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                             parsed_command.end());
             list_length = it->second.size();
         } else {
-            // Create new list with all elements
+            // Create new list with all elements in original order
             std::vector<std::string> new_list(parsed_command.begin() + 2, parsed_command.end());
             list_store[key] = new_list;
             list_length = new_list.size();
