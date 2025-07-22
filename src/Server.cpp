@@ -1119,6 +1119,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     }
 } else if (command == "LRANGE" && parsed_command.size() == 4) {
     std::string key = parsed_command[1];
+    
     try {
         int start = std::stoi(parsed_command[2]);
         int end = std::stoi(parsed_command[3]);
@@ -1133,12 +1134,21 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         const auto& list = it->second;
         int list_size = list.size();
         
-        // Handle negative indices (we'll implement this in the next stage)
-        // For now, just treat them as invalid (they'll be caught by the bounds checks)
-        
-        // Adjust indices according to Redis behavior
+        // Handle negative indices
         if (start < 0) {
-            start = 0;
+            start = list_size + start;
+            if (start < 0) start = 0;
+        }
+        
+        if (end < 0) {
+            end = list_size + end;
+            if (end < 0) end = 0;
+        }
+        
+        // Bounds checking
+        if (start >= list_size) {
+            send(client_fd, "*0\r\n", 4, 0);
+            return;
         }
         
         if (end >= list_size) {
@@ -1146,7 +1156,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         }
         
         // Check if range is valid
-        if (start >= list_size || start > end) {
+        if (start > end) {
             send(client_fd, "*0\r\n", 4, 0);
             return;
         }
