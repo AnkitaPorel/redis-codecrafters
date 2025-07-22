@@ -1097,7 +1097,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     } else if (command == "RPUSH" && parsed_command.size() >= 3) {
         std::string key = parsed_command[1];
         int elements_to_add = parsed_command.size() - 2;
-        int list_length;
+        int initial_length;
         
         {
             auto it = list_store.find(key);
@@ -1105,14 +1105,14 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 for (int i = 2; i < parsed_command.size(); i++) {
                     it->second.push_back(parsed_command[i]);
                 }
-                list_length = it->second.size();
+                initial_length = it->second.size();
             } else {
                 std::vector<std::string> new_list;
                 for (int i = 2; i < parsed_command.size(); i++) {
                     new_list.push_back(parsed_command[i]);
                 }
                 list_store[key] = new_list;
-                list_length = new_list.size();
+                initial_length = new_list.size();
             }
         }
         
@@ -1159,7 +1159,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
             }
         }
         
-        std::string response = ":" + std::to_string(list_length) + "\r\n";
+        std::string response = ":" + std::to_string(initial_length) + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
         
         if (connected_replicas.find(client_fd) == connected_replicas.end()) {
