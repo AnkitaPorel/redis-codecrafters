@@ -1151,11 +1151,6 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                     std::vector<std::string> lpop_cmd = {"LPOP", key};
                     propagate_to_replicas(lpop_cmd);
                 }
-                
-                // list_length = list_it->second.size();
-                // if (list_length == 0) {
-                //     list_store.erase(list_it);
-                // }
             }
         }
         
