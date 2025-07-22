@@ -1117,6 +1117,54 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
     if (connected_replicas.find(client_fd) == connected_replicas.end()) {
         propagate_to_replicas(parsed_command);
     }
+} else if (command == "LRANGE" && parsed_command.size() == 4) {
+    std::string key = parsed_command[1];
+    try {
+        int start = std::stoi(parsed_command[2]);
+        int end = std::stoi(parsed_command[3]);
+        
+        auto it = list_store.find(key);
+        if (it == list_store.end()) {
+            // Key doesn't exist, return empty array
+            send(client_fd, "*0\r\n", 4, 0);
+            return;
+        }
+        
+        const auto& list = it->second;
+        int list_size = list.size();
+        
+        // Handle negative indices (we'll implement this in the next stage)
+        // For now, just treat them as invalid (they'll be caught by the bounds checks)
+        
+        // Adjust indices according to Redis behavior
+        if (start < 0) {
+            start = 0;
+        }
+        
+        if (end >= list_size) {
+            end = list_size - 1;
+        }
+        
+        // Check if range is valid
+        if (start >= list_size || start > end) {
+            send(client_fd, "*0\r\n", 4, 0);
+            return;
+        }
+        
+        // Build the response
+        int count = end - start + 1;
+        std::string response = "*" + std::to_string(count) + "\r\n";
+        
+        for (int i = start; i <= end; i++) {
+            const std::string& element = list[i];
+            response += "$" + std::to_string(element.length()) + "\r\n" + element + "\r\n";
+        }
+        
+        send(client_fd, response.c_str(), response.length(), 0);
+    } catch (const std::exception& e) {
+        std::string response = "-ERR value is not an integer or out of range\r\n";
+        send(client_fd, response.c_str(), response.length(), 0);
+    }
 } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
