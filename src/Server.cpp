@@ -1098,7 +1098,7 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         std::string key = parsed_command[1];
         int elements_to_add = parsed_command.size() - 2;
         int list_length;
-    
+        
         {
             auto it = list_store.find(key);
             if (it != list_store.end()) {
@@ -1115,10 +1115,53 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
                 list_length = new_list.size();
             }
         }
-    
+        
+        std::vector<BlockedClient> to_unblock;
+        {
+            std::lock_guard<std::mutex> lock(blocked_clients_mutex);
+            for (auto it = blocked_clients.begin(); it != blocked_clients.end();) {
+                if (it->is_list_block && it->key == key) {
+                    to_unblock.push_back(*it);
+                    it = blocked_clients.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        
+        if (!to_unblock.empty()) {
+            std::sort(to_unblock.begin(), to_unblock.end(), 
+                [](const BlockedClient& a, const BlockedClient& b) {
+                    return a.expiry < b.expiry;
+                });
+            
+            auto& client = to_unblock[0];
+            auto list_it = list_store.find(key);
+            if (list_it != list_store.end() && !list_it->second.empty()) {
+                std::string popped_value = list_it->second.front();
+                list_it->second.erase(list_it->second.begin());
+                
+                std::string response = "*2\r\n";
+                response += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
+                response += "$" + std::to_string(popped_value.length()) + "\r\n" + popped_value + "\r\n";
+                
+                send(client.fd, response.c_str(), response.length(), 0);
+                
+                if (connected_replicas.find(client.fd) == connected_replicas.end()) {
+                    std::vector<std::string> lpop_cmd = {"LPOP", key};
+                    propagate_to_replicas(lpop_cmd);
+                }
+                
+                list_length = list_it->second.size();
+                if (list_length == 0) {
+                    list_store.erase(list_it);
+                }
+            }
+        }
+        
         std::string response = ":" + std::to_string(list_length) + "\r\n";
         send(client_fd, response.c_str(), response.length(), 0);
-    
+        
         if (connected_replicas.find(client_fd) == connected_replicas.end()) {
             propagate_to_replicas(parsed_command);
         }
@@ -1262,6 +1305,60 @@ void execute_redis_command(int client_fd, const std::vector<std::string>& parsed
         
         if (connected_replicas.find(client_fd) == connected_replicas.end()) {
             propagate_to_replicas(parsed_command);
+        }
+    } else if (command == "BLPOP" && parsed_command.size() >= 3) {
+        double timeout;
+        try {
+            timeout = std::stod(parsed_command.back());
+        } catch (const std::exception& e) {
+            std::string response = "-ERR timeout is not a float\r\n";
+            send(client_fd, response.c_str(), response.length(), 0);
+            return;
+        }
+
+        for (size_t i = 1; i < parsed_command.size() - 1; i++) {
+            const std::string& list_key = parsed_command[i];
+            auto it = list_store.find(list_key);
+            
+            if (it != list_store.end() && !it->second.empty()) {
+                std::string popped_value = it->second.front();
+                it->second.erase(it->second.begin());
+                
+                if (it->second.empty()) {
+                    list_store.erase(it);
+                }
+                
+                std::string response = "*2\r\n";
+                response += "$" + std::to_string(list_key.length()) + "\r\n" + list_key + "\r\n";
+                response += "$" + std::to_string(popped_value.length()) + "\r\n" + popped_value + "\r\n";
+                
+                send(client_fd, response.c_str(), response.length(), 0);
+                
+                if (connected_replicas.find(client_fd) == connected_replicas.end()) {
+                    std::vector<std::string> lpop_cmd = {"LPOP", list_key};
+                    propagate_to_replicas(lpop_cmd);
+                }
+                return;
+            }
+        }
+        
+        BlockedClient client;
+        client.fd = client_fd;
+        client.key = parsed_command[1];
+        client.is_list_block = true;
+        
+        if (timeout == 0) {
+            client.expiry = std::chrono::steady_clock::time_point::max();
+        } else {
+            client.expiry = std::chrono::steady_clock::now() + 
+                        std::chrono::milliseconds(static_cast<long>(timeout * 1000));
+        }
+        
+        {
+            std::lock_guard<std::mutex> lock(blocked_clients_mutex);
+            blocked_clients.push_back(client);
+            std::cout << "BLPOP: Blocking client fd=" << client_fd 
+                    << " on list '" << client.key << "'" << std::endl;
         }
     } else {
         std::string response = "-ERR unknown command or wrong number of arguments\r\n";

@@ -66,8 +66,9 @@ struct StreamData {
 
 struct BlockedClient {
     int fd;
-    std::string stream_key;
+    std::string key;
     std::string last_id;
+    bool is_list_block;
     std::chrono::steady_clock::time_point expiry;
 };
 
@@ -120,7 +121,7 @@ std::chrono::steady_clock::time_point get_current_time() {
 
 bool is_write_command(const std::string& command) {
     return (command == "SET" || command == "DEL" || command == "INCR" || command == "DECR" || 
-            command == "LPUSH" || command == "RPUSH" || command == "LPOP" || command == "RPOP" ||
+            command == "LPUSH" || command == "RPUSH" || command == "LPOP" || command == "RPOP" || command == "BLPOP"
             command == "SADD" || command == "SREM" || command == "HSET" || command == "HDEL" || command == "XADD" || command == "LRANGE");
 }
 
@@ -156,6 +157,7 @@ void check_blocked_clients_timeout() {
         
         auto now = std::chrono::steady_clock::now();
         std::vector<BlockedClient> timed_out;
+        std::vector<std::pair<int, std::string>> to_unblock;
         
         {
             std::lock_guard<std::mutex> lock(blocked_clients_mutex);
@@ -163,8 +165,39 @@ void check_blocked_clients_timeout() {
                 if (now >= it->expiry) {
                     timed_out.push_back(*it);
                     it = blocked_clients.erase(it);
+                } else if (it->is_list_block) {
+                    auto list_it = list_store.find(it->key);
+                    if (list_it != list_store.end() && !list_it->second.empty()) {
+                        to_unblock.emplace_back(it->fd, it->key);
+                        it = blocked_clients.erase(it);
+                    } else {
+                        ++it;
+                    }
                 } else {
                     ++it;
+                }
+            }
+        }
+        
+        for (const auto& [fd, list_key] : to_unblock) {
+            auto list_it = list_store.find(list_key);
+            if (list_it != list_store.end() && !list_it->second.empty()) {
+                std::string popped_value = list_it->second.front();
+                list_it->second.erase(list_it->second.begin());
+                
+                if (list_it->second.empty()) {
+                    list_store.erase(list_it);
+                }
+                
+                std::string response = "*2\r\n";
+                response += "$" + std::to_string(list_key.length()) + "\r\n" + list_key + "\r\n";
+                response += "$" + std::to_string(popped_value.length()) + "\r\n" + popped_value + "\r\n";
+                
+                send(fd, response.c_str(), response.length(), 0);
+                
+                if (connected_replicas.find(fd) == connected_replicas.end()) {
+                    std::vector<std::string> lpop_cmd = {"LPOP", list_key};
+                    propagate_to_replicas(lpop_cmd);
                 }
             }
         }
